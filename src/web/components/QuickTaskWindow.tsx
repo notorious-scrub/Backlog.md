@@ -26,7 +26,6 @@ const QuickTaskWindow: React.FC<QuickTaskWindowProps> = ({ availableStatuses }) 
 	const [references, setReferences] = useState<string[]>([]);
 	const [newReference, setNewReference] = useState("");
 	const [isUploadingScreenshot, setIsUploadingScreenshot] = useState(false);
-	const [taskIdForScreenshots, setTaskIdForScreenshots] = useState<string | null>(null);
 	const [isSaving, setIsSaving] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
@@ -47,25 +46,6 @@ const QuickTaskWindow: React.FC<QuickTaskWindowProps> = ({ availableStatuses }) 
 				setStatus((current) => current || "To Do");
 			});
 	}, [availableStatuses]);
-
-	useEffect(() => {
-		let cancelled = false;
-		void apiClient
-			.fetchNextTaskId()
-			.then((nextId) => {
-				if (!cancelled) {
-					setTaskIdForScreenshots(nextId);
-				}
-			})
-			.catch(() => {
-				if (!cancelled) {
-					setTaskIdForScreenshots(null);
-				}
-			});
-		return () => {
-			cancelled = true;
-		};
-	}, []);
 
 	const addReference = () => {
 		const trimmed = newReference.trim();
@@ -91,8 +71,7 @@ const QuickTaskWindow: React.FC<QuickTaskWindowProps> = ({ availableStatuses }) 
 				pastedImages.map((file, index) =>
 					apiClient.uploadScreenshot(file, {
 						prefix: "task",
-						taskId: taskIdForScreenshots ?? undefined,
-						filename: taskIdForScreenshots ? undefined : `quick-task-${Date.now()}-${index + 1}`,
+						filename: `quick-task-${Date.now()}-${index + 1}`,
 					}),
 				),
 			);
@@ -127,7 +106,6 @@ const QuickTaskWindow: React.FC<QuickTaskWindowProps> = ({ availableStatuses }) 
 				priority: priority || undefined,
 				status,
 			} as Omit<Task, "id" | "createdDate">);
-			setTaskIdForScreenshots(createdTask.id);
 			localStorage.setItem(QUICK_TASK_STORAGE_KEY, String(Date.now()));
 			window.close();
 		} catch (err) {

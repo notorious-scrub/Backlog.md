@@ -282,18 +282,6 @@ export class ApiClient {
 		return response.json();
 	}
 
-	async fetchNextTaskId(): Promise<string> {
-		const response = await fetch(`${API_BASE}/tasks/next-id`);
-		if (!response.ok) {
-			throw new Error("Failed to fetch next task id");
-		}
-		const data = (await response.json()) as { id?: string };
-		if (!data.id) {
-			throw new Error("Next task id missing from response");
-		}
-		return data.id;
-	}
-
 	async fetchScreenshots(): Promise<string[]> {
 		const response = await fetch(`${API_BASE}/screenshots`);
 		if (!response.ok) {

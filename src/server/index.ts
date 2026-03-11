@@ -8,7 +8,6 @@ import { initializeProject } from "../core/init.ts";
 import type { SearchService } from "../core/search-service.ts";
 import { getTaskStatistics } from "../core/statistics.ts";
 import type { SearchPriorityFilter, SearchResultType, Task, TaskUpdateInput } from "../types/index.ts";
-import { EntityType } from "../types/index.ts";
 import { watchConfig } from "../utils/config-watcher.ts";
 import { getVersion } from "../utils/version.ts";
 
@@ -318,9 +317,6 @@ export class BacklogServer {
 					"/api/tasks": {
 						GET: async (req: Request) => await this.handleListTasks(req),
 						POST: async (req: Request) => await this.handleCreateTask(req),
-					},
-					"/api/tasks/next-id": {
-						GET: async () => await this.handleGetNextTaskId(),
 					},
 					"/api/task/:id": {
 						GET: async (req: Request & { params: { id: string } }) => await this.handleGetTask(req.params.id),
@@ -1026,16 +1022,6 @@ export class BacklogServer {
 		const config = await this.core.filesystem.loadConfig();
 		const statuses = config?.statuses || ["To Do", "In Progress", "Done"];
 		return Response.json(statuses);
-	}
-
-	private async handleGetNextTaskId(): Promise<Response> {
-		try {
-			const id = await this.core.generateNextId(EntityType.Task);
-			return Response.json({ id });
-		} catch (error) {
-			console.error("Error generating next task id:", error);
-			return Response.json({ error: "Failed to generate next task id" }, { status: 500 });
-		}
 	}
 
 	private async handleListScreenshots(): Promise<Response> {

@@ -72,6 +72,20 @@ describe("CLI ID Incrementing Behavior", () => {
 		expect(task2?.title).toBe("Task After Completion");
 	});
 
+	test("should promote drafts using the next available task ID after completion", async () => {
+		const { task: completedTask } = await core.createTaskFromInput({ title: "Completed Task" });
+		const completed = await core.completeTask(completedTask.id);
+		expect(completed).toBe(true);
+
+		const { task: draft } = await core.createTaskFromInput({ title: "Draft To Promote", status: "Draft" });
+		const promoted = await core.promoteDraft(draft.id);
+		expect(promoted).toBe(true);
+
+		const task2 = await core.filesystem.loadTask("task-2");
+		expect(task2).toBeDefined();
+		expect(task2?.title).toBe("Draft To Promote");
+	});
+
 	test("should increment document IDs correctly", async () => {
 		const doc1: Document = {
 			id: "doc-1",

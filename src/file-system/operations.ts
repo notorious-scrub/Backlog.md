@@ -439,24 +439,26 @@ export class FileSystem {
 		}
 	}
 
-	async promoteDraft(draftId: string): Promise<boolean> {
+	async promoteDraft(draftId: string, providedTaskId?: string): Promise<boolean> {
 		try {
 			// Load the draft
 			const draft = await this.loadDraft(draftId);
 			if (!draft || !draft.filePath) return false;
 
-			// Get task prefix from config (default: "task")
-			const config = await this.loadConfig();
-			const taskPrefix = config?.prefixes?.task ?? "task";
+			let newTaskId = providedTaskId;
+			if (!newTaskId) {
+				// Get task prefix from config (default: "task")
+				const config = await this.loadConfig();
+				const taskPrefix = config?.prefixes?.task ?? "task";
 
-			// Get existing task IDs to generate next ID
-			// Include both active and completed tasks to prevent ID collisions
-			const existingTasks = await this.listTasks();
-			const completedTasks = await this.listCompletedTasks();
-			const existingIds = [...existingTasks, ...completedTasks].map((t) => t.id);
+				// Get existing task IDs to generate next ID
+				// Include both active and completed tasks to prevent ID collisions
+				const existingTasks = await this.listTasks();
+				const completedTasks = await this.listCompletedTasks();
+				const existingIds = [...existingTasks, ...completedTasks].map((t) => t.id);
 
-			// Generate new task ID
-			const newTaskId = generateNextId(existingIds, taskPrefix, config?.zeroPaddedIds);
+				newTaskId = generateNextId(existingIds, taskPrefix, config?.zeroPaddedIds);
+			}
 
 			// Update draft with new task ID and save as task
 			const promotedTask: Task = {
@@ -476,20 +478,23 @@ export class FileSystem {
 		}
 	}
 
-	async demoteTask(taskId: string): Promise<boolean> {
+	async demoteTask(taskId: string, providedDraftId?: string): Promise<boolean> {
 		try {
 			// Load the task
 			const task = await this.loadTask(taskId);
 			if (!task || !task.filePath) return false;
 
-			// Get existing draft IDs to generate next ID
-			// Draft prefix is always "draft" (not configurable like task prefix)
-			const existingDrafts = await this.listDrafts();
-			const existingIds = existingDrafts.map((d) => d.id);
+			let newDraftId = providedDraftId;
+			if (!newDraftId) {
+				// Get existing draft IDs to generate next ID
+				// Draft prefix is always "draft" (not configurable like task prefix)
+				const existingDrafts = await this.listDrafts();
+				const existingIds = existingDrafts.map((d) => d.id);
 
-			// Generate new draft ID
-			const config = await this.loadConfig();
-			const newDraftId = generateNextId(existingIds, "draft", config?.zeroPaddedIds);
+				// Generate new draft ID
+				const config = await this.loadConfig();
+				newDraftId = generateNextId(existingIds, "draft", config?.zeroPaddedIds);
+			}
 
 			// Update task with new draft ID and save as draft
 			const demotedDraft: Task = {

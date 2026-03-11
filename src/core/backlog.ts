@@ -2180,7 +2180,13 @@ export class Core {
 	}
 
 	async promoteDraft(draftId: string, autoCommit?: boolean): Promise<boolean> {
-		const success = await this.fs.promoteDraft(draftId);
+		const draft = await this.fs.loadDraft(draftId);
+		if (!draft) {
+			return false;
+		}
+
+		const newTaskId = await this.generateNextId(EntityType.Task, draft.parentTaskId);
+		const success = await this.fs.promoteDraft(draftId, newTaskId);
 
 		if (success && (await this.shouldAutoCommit(autoCommit))) {
 			const backlogDir = await this.getBacklogDirectoryName();
@@ -2192,7 +2198,13 @@ export class Core {
 	}
 
 	async demoteTask(taskId: string, autoCommit?: boolean): Promise<boolean> {
-		const success = await this.fs.demoteTask(taskId);
+		const task = await this.fs.loadTask(taskId);
+		if (!task) {
+			return false;
+		}
+
+		const newDraftId = await this.generateNextId(EntityType.Draft);
+		const success = await this.fs.demoteTask(taskId, newDraftId);
 
 		if (success && (await this.shouldAutoCommit(autoCommit))) {
 			const backlogDir = await this.getBacklogDirectoryName();

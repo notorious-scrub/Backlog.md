@@ -687,6 +687,7 @@ export class FileSystem {
 		await Bun.write(filepath, content);
 
 		document.path = relativePath;
+		document.isLegacy = relativePath.replace(/\\/g, "/").toLowerCase().startsWith("legacy/");
 		return relativePath;
 	}
 
@@ -714,25 +715,75 @@ export class FileSystem {
 
 	async listDocuments(): Promise<Document[]> {
 		try {
-			const docsDir = await this.getDocsDir();
-			// Recursively include all markdown files under docs, excluding README.md variants
-			const glob = new Bun.Glob("**/*.md");
-			const docFiles = await Array.fromAsync(glob.scan({ cwd: docsDir, followSymlinks: true }));
-			const docs: Document[] = [];
-			for (const file of docFiles) {
-				const base = file.split("/").pop() || file;
-				if (base.toLowerCase() === "readme.md") continue;
-				const filepath = join(docsDir, file);
-				const content = await Bun.file(filepath).text();
-				const parsed = parseDocument(content);
-				docs.push({
-					...parsed,
-					path: file,
-				});
+			const primaryDocsDir = await this.getDocsDir();
+			const legacyDocsDir = join(this.projectRoot, "documents");
+			const docsById = new Map<string, Document>();
+			const scanTargets = [primaryDocsDir, legacyDocsDir];
+
+			for (const docsDir of scanTargets) {
+				let docFiles: string[] = [];
+				try {
+					const glob = new Bun.Glob("**/*.md");
+					docFiles = await Array.fromAsync(glob.scan({ cwd: docsDir, followSymlinks: true }));
+				} catch {
+					continue;
+				}
+
+				for (const file of docFiles) {
+					const base = file.split("/").pop() || file;
+					if (base.toLowerCase() === "readme.md") {
+						continue;
+					}
+
+					try {
+						const filepath = join(docsDir, file);
+						const content = await Bun.file(filepath).text();
+						const parsed = parseDocument(content);
+						const titleFromHeading = parsed.rawContent.match(/^\s*#\s+(.+?)\s*$/m)?.[1]?.trim() ?? "";
+						const filenameStem = base.replace(/\.md$/i, "");
+						const [, ...titleParts] = filenameStem.split(" - ");
+						const fallbackTitleSource = titleParts.length > 0 ? titleParts.join(" - ") : filenameStem;
+						const fallbackTitle = fallbackTitleSource.replace(/[-_]+/g, " ").trim();
+						const title = parsed.title.trim() || titleFromHeading || fallbackTitle || "Untitled Document";
+
+						const explicitId = parsed.id.trim();
+						const fileIdMatch = filenameStem.match(/^(doc-[^\s]+)$/i);
+						const pathStem = file.replace(/\.md$/i, "");
+						const pathSlug = pathStem
+							.toLowerCase()
+							.replace(/[\\/]+/g, "-")
+							.replace(/[^a-z0-9-]+/g, "-")
+							.replace(/-+/g, "-")
+							.replace(/^-|-$/g, "");
+						const fallbackIdSeed = pathSlug || `legacy-${docsById.size + 1}`;
+						const idCandidate = explicitId || fileIdMatch?.[1] || fallbackIdSeed;
+						const normalizedId = normalizeDocumentId(idCandidate);
+						let finalId = normalizedId;
+
+						if (docsById.has(finalId)) {
+							if (explicitId || fileIdMatch?.[1]) {
+								continue;
+							}
+
+							let suffix = 2;
+							while (docsById.has(`${normalizedId}-${suffix}`)) {
+								suffix += 1;
+							}
+							finalId = `${normalizedId}-${suffix}`;
+						}
+
+						docsById.set(finalId, {
+							...parsed,
+							id: finalId,
+							title,
+							path: file,
+							isLegacy: file.replace(/\\/g, "/").toLowerCase().startsWith("legacy/"),
+						});
+					} catch {}
+				}
 			}
 
-			// Stable sort by title for UI/CLI listing
-			return docs.sort((a, b) => a.title.localeCompare(b.title));
+			return [...docsById.values()].sort((a, b) => a.title.localeCompare(b.title));
 		} catch {
 			return [];
 		}
@@ -954,7 +1005,7 @@ ${rawContent.trim()}
 		}
 	}
 
-	async createMilestone(title: string, description?: string): Promise<Milestone> {
+	async createMilestone(title: string, description?: string, providedId?: string): Promise<Milestone> {
 		const milestonesDir = await this.getMilestonesDir();
 
 		// Ensure milestones directory exists
@@ -996,7 +1047,7 @@ ${rawContent.trim()}
 		).filter((id): id is number => typeof id === "number" && id >= 0);
 
 		const nextId = existingIds.length > 0 ? Math.max(...existingIds) + 1 : 0;
-		const id = `m-${nextId}`;
+		const id = providedId ?? `m-${nextId}`;
 
 		const filename = this.buildMilestoneFilename(id, title);
 		const content = this.serializeMilestoneContent(
@@ -1290,6 +1341,27 @@ ${description || `Milestone: ${title}`}`,
 							.filter(Boolean);
 					}
 					break;
+				case "status_colors":
+				case "statusColors":
+					if (value.startsWith("{") && value.endsWith("}")) {
+						try {
+							const parsed = JSON.parse(value) as Record<string, unknown>;
+							const statusColors: Record<string, string> = {};
+							for (const [status, color] of Object.entries(parsed)) {
+								if (typeof status === "string" && typeof color === "string") {
+									const trimmedStatus = status.trim();
+									const trimmedColor = color.trim();
+									if (trimmedStatus.length > 0 && trimmedColor.length > 0) {
+										statusColors[trimmedStatus] = trimmedColor;
+									}
+								}
+							}
+							config.statusColors = statusColors;
+						} catch {
+							// Ignore malformed status color map and continue parsing other fields.
+						}
+					}
+					break;
 				case "definition_of_done":
 					if (value.startsWith("[") && value.endsWith("]")) {
 						const arrayContent = value.slice(1, -1);
@@ -1348,6 +1420,7 @@ ${description || `Milestone: ${title}`}`,
 			defaultAssignee: config.defaultAssignee,
 			defaultReporter: config.defaultReporter,
 			statuses: config.statuses || [...DEFAULT_STATUSES],
+			statusColors: config.statusColors,
 			labels: config.labels || [],
 			definitionOfDone: config.definitionOfDone,
 			defaultStatus: config.defaultStatus,
@@ -1369,12 +1442,24 @@ ${description || `Milestone: ${title}`}`,
 
 	private serializeConfig(config: BacklogConfig): string {
 		const normalizedDefinitionOfDone = this.normalizeDefinitionOfDone(config.definitionOfDone);
+		const normalizedStatusColors: Record<string, string> = {};
+		for (const [status, color] of Object.entries(config.statusColors ?? {})) {
+			const trimmedStatus = status.trim();
+			const trimmedColor = color.trim();
+			if (trimmedStatus.length === 0 || trimmedColor.length === 0) {
+				continue;
+			}
+			normalizedStatusColors[trimmedStatus] = trimmedColor;
+		}
 		const lines = [
 			`project_name: "${config.projectName}"`,
 			...(config.defaultAssignee ? [`default_assignee: "${config.defaultAssignee}"`] : []),
 			...(config.defaultReporter ? [`default_reporter: "${config.defaultReporter}"`] : []),
 			...(config.defaultStatus ? [`default_status: "${config.defaultStatus}"`] : []),
 			`statuses: [${config.statuses.map((s) => `"${s}"`).join(", ")}]`,
+			...(Object.keys(normalizedStatusColors).length > 0
+				? [`status_colors: ${JSON.stringify(normalizedStatusColors)}`]
+				: []),
 			`labels: [${config.labels.map((l) => `"${l}"`).join(", ")}]`,
 			...(Array.isArray(normalizedDefinitionOfDone)
 				? [`definition_of_done: [${normalizedDefinitionOfDone.map((item) => `"${item}"`).join(", ")}]`]

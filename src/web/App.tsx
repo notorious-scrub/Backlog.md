@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Layout from './components/Layout';
 import BoardPage from './components/BoardPage';
@@ -10,6 +10,7 @@ import Settings from './components/Settings';
 import Statistics from './components/Statistics';
 import MilestonesPage from './components/MilestonesPage';
 import TaskDetailsModal from './components/TaskDetailsModal';
+import QuickTaskWindow from './components/QuickTaskWindow';
 import InitializationScreen from './components/InitializationScreen';
 import { SuccessToast } from './components/SuccessToast';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -182,6 +183,7 @@ function App() {
   const [docs, setDocs] = useState<Document[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [hasPendingExternalUpdates, setHasPendingExternalUpdates] = useState(false);
   
   const { isOnline } = useHealthCheckContext();
   const previousOnlineRef = useRef<boolean | null>(null);
@@ -217,6 +219,7 @@ function App() {
 
   const applySearchResults = useCallback((
     results: SearchResult[],
+    docsOverride?: Document[],
     archivedMilestoneKeys?: Set<string>,
     milestoneAliases?: Map<string, string>,
   ) => {
@@ -245,7 +248,7 @@ function App() {
             }
             return { ...task, milestone: canonicalMilestone || undefined };
           });
-    const docsList = documentResults.map((result) => result.document);
+    const docsList = docsOverride ?? documentResults.map((result) => result.document);
     const decisionsList = decisionResults.map((result) => result.decision);
 
     setTasks(normalizedTasks);
@@ -258,17 +261,18 @@ function App() {
   const loadAllData = useCallback(async () => {
     try {
       setIsLoading(true);
-      const [statusesData, configData, searchResults, milestonesData, archivedMilestonesData] = await Promise.all([
+      const [statusesData, configData, searchResults, docsData, milestonesData, archivedMilestonesData] = await Promise.all([
         apiClient.fetchStatuses(),
         apiClient.fetchConfig(),
         apiClient.search(),
+        apiClient.fetchDocs(),
         apiClient.fetchMilestones(),
         apiClient.fetchArchivedMilestones(),
       ]);
 
       const archivedKeys = new Set(collectArchivedMilestoneKeys(archivedMilestonesData, milestonesData));
       const milestoneAliases = buildMilestoneAliasMap(milestonesData, archivedMilestonesData);
-      const { tasks: tasksList } = applySearchResults(searchResults, archivedKeys, milestoneAliases);
+      const { tasks: tasksList } = applySearchResults(searchResults, docsData, archivedKeys, milestoneAliases);
 
       setStatuses(statusesData);
       setProjectName(configData.projectName);
@@ -301,14 +305,15 @@ function App() {
       // Connection restored, reload data
       const loadData = async () => {
         try {
-          const [results, milestonesData, archivedMilestonesData] = await Promise.all([
+          const [results, docsData, milestonesData, archivedMilestonesData] = await Promise.all([
             apiClient.search(),
+            apiClient.fetchDocs(),
             apiClient.fetchMilestones(),
             apiClient.fetchArchivedMilestones(),
           ]);
           const archivedKeys = new Set(collectArchivedMilestoneKeys(archivedMilestonesData, milestonesData));
           const milestoneAliases = buildMilestoneAliasMap(milestonesData, archivedMilestonesData);
-          const { tasks: tasksList } = applySearchResults(results, archivedKeys, milestoneAliases);
+          const { tasks: tasksList } = applySearchResults(results, docsData, archivedKeys, milestoneAliases);
           setMilestoneEntities(milestonesData);
           setArchivedMilestones(archivedMilestonesData);
           setMilestones(
@@ -375,6 +380,33 @@ function App() {
     setShowModal(true);
   };
 
+  const modalTaskNavigationIds = useMemo(
+    () =>
+      [...tasks]
+        .sort((a, b) => b.id.localeCompare(a.id, undefined, { numeric: true, sensitivity: "base" }))
+        .map((task) => task.id),
+    [tasks],
+  );
+
+  const handleNavigateTask = useCallback(
+    (taskId: string) => {
+      const nextTask = tasks.find((task) => task.id === taskId);
+      if (!nextTask) return;
+      setEditingTask(nextTask);
+      setShowModal(true);
+    },
+    [tasks],
+  );
+
+  const handleNewQuickTask = () => {
+    const url = `${window.location.origin}/quick-task`;
+    window.open(
+      url,
+      "backlog-quick-task",
+      "popup=yes,width=680,height=780,left=120,top=80,resizable=yes,scrollbars=yes",
+    );
+  };
+
   const handleCloseModal = () => {
     setShowModal(false);
     setEditingTask(null);
@@ -382,8 +414,19 @@ function App() {
   };
 
   const refreshData = useCallback(async () => {
+    if (showModal) {
+      setHasPendingExternalUpdates(true);
+      return;
+    }
     await loadAllData();
-  }, [loadAllData]);
+  }, [loadAllData, showModal]);
+
+  useEffect(() => {
+    if (!showModal && hasPendingExternalUpdates) {
+      setHasPendingExternalUpdates(false);
+      void loadAllData();
+    }
+  }, [showModal, hasPendingExternalUpdates, loadAllData]);
 
   // Sync editingTask with refreshed tasks data to prevent stale state
   // This fixes the bug where acceptance criteria disappears after save (GitHub #467)
@@ -409,6 +452,16 @@ function App() {
     };
     return () => ws.close();
   }, [refreshData, loadAllData]);
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === "backlog:quick-task-created" && event.newValue) {
+        void refreshData();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [refreshData]);
 
   const handleSubmitTask = async (taskData: Partial<Task>) => {
     // Don't catch errors here - let TaskDetailsModal handle them
@@ -473,6 +526,7 @@ function App() {
     <ThemeProvider>
       <BrowserRouter>
         <Routes>
+          <Route path="/quick-task" element={<QuickTaskWindow availableStatuses={statuses} />} />
             <Route
             path="/"
             element={
@@ -494,6 +548,7 @@ function App() {
                 <BoardPage
                   onEditTask={handleEditTask}
                   onNewTask={handleNewTask}
+                  onNewQuickTask={handleNewQuickTask}
                 tasks={tasks}
                 onRefreshData={refreshData}
                 statuses={statuses}
@@ -501,6 +556,7 @@ function App() {
                 milestoneEntities={milestoneEntities}
                 archivedMilestones={archivedMilestones}
                 isLoading={isLoading}
+                statusColors={config?.statusColors}
               />
             }
           />
@@ -510,12 +566,14 @@ function App() {
 	                <TaskList
 	                  onEditTask={handleEditTask}
 	                  onNewTask={handleNewTask}
+	                  onNewQuickTask={handleNewQuickTask}
 	                  tasks={tasks}
 	                  availableStatuses={statuses}
 	                  availableLabels={availableLabels}
 	                  availableMilestones={milestones}
 	                  milestoneEntities={milestoneEntities}
 	                  archivedMilestones={archivedMilestones}
+	                  statusColors={config?.statusColors}
 	                  onRefreshData={refreshData}
 	                />
 	              }
@@ -549,6 +607,8 @@ function App() {
           task={editingTask || undefined}
           isOpen={showModal}
           onClose={handleCloseModal}
+          onNavigateTask={handleNavigateTask}
+          taskNavigationIds={modalTaskNavigationIds}
           onSaved={refreshData}
           onSubmit={handleSubmitTask}
           onArchive={editingTask ? () => handleArchiveTask(editingTask.id) : undefined}
@@ -558,6 +618,7 @@ function App() {
           archivedMilestoneEntities={archivedMilestones}
           isDraftMode={isDraftMode}
           definitionOfDoneDefaults={config?.definitionOfDone ?? []}
+          hasPendingExternalUpdates={hasPendingExternalUpdates}
         />
 
         {/* Task Creation Confirmation Toast */}

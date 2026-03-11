@@ -1,11 +1,11 @@
 ---
 id: BACK-397
 title: Fix drag-and-drop between kanban columns when target column is shorter
-status: Done
+status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-02-22 17:22'
-updated_date: '2026-02-22 17:22'
+updated_date: '2026-02-23 03:36'
 labels:
   - bug
   - web-ui
@@ -14,13 +14,20 @@ dependencies: []
 references:
   - 'https://github.com/MrLesk/Backlog.md/issues/543'
   - 'https://github.com/MrLesk/Backlog.md/pull/544'
+  - backlog/images/capy_birthday.png
 priority: high
 ---
 
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+RE-OPENED at 2026-02-23 03:36:27 UTC
+Still brokn!
+
+=============
 Web Kanban drag-and-drop fails when moving a task from a long source column to a shorter adjacent target column unless dropped near the top. Root cause is that TaskColumn did not fill the stretched wrapper height, so onDragOver/onDrop handlers were not reachable across the full visible column area.
+
+review screenshots: capy_birthday
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -7,6 +7,7 @@ import { type LaneMode } from '../lib/lanes';
 interface BoardPageProps {
 	onEditTask: (task: Task) => void;
 	onNewTask: () => void;
+	onNewQuickTask: () => void;
 	tasks: Task[];
 	onRefreshData?: () => Promise<void>;
 	statuses: string[];
@@ -14,11 +15,13 @@ interface BoardPageProps {
 	milestoneEntities: Milestone[];
 	archivedMilestones: Milestone[];
 	isLoading: boolean;
+	statusColors?: Record<string, string>;
 }
 
 export default function BoardPage({
 	onEditTask,
 	onNewTask,
+	onNewQuickTask,
 	tasks,
 	onRefreshData,
 	statuses,
@@ -26,6 +29,7 @@ export default function BoardPage({
 	milestoneEntities,
 	archivedMilestones,
 	isLoading,
+	statusColors,
 }: BoardPageProps) {
 	const [searchParams, setSearchParams] = useSearchParams();
 	const [highlightTaskId, setHighlightTaskId] = useState<string | null>(null);
@@ -90,6 +94,7 @@ export default function BoardPage({
 			<Board
 				onEditTask={handleEditTask}
 				onNewTask={onNewTask}
+				onNewQuickTask={onNewQuickTask}
 				highlightTaskId={highlightTaskId}
 				tasks={tasks}
 				onRefreshData={onRefreshData}
@@ -98,6 +103,7 @@ export default function BoardPage({
 				milestoneEntities={milestoneEntities}
 				archivedMilestones={archivedMilestones}
 				isLoading={isLoading}
+				statusColors={statusColors}
 				laneMode={laneMode}
 				onLaneChange={handleLaneChange}
 				milestoneFilter={milestoneFilter}

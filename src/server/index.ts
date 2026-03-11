@@ -1,4 +1,5 @@
-import { dirname, join } from "node:path";
+import { mkdir, readdir } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { $ } from "bun";
 import { Core } from "../core/backlog.ts";
@@ -7,6 +8,7 @@ import { initializeProject } from "../core/init.ts";
 import type { SearchService } from "../core/search-service.ts";
 import { getTaskStatistics } from "../core/statistics.ts";
 import type { SearchPriorityFilter, SearchResultType, Task, TaskUpdateInput } from "../types/index.ts";
+import { EntityType } from "../types/index.ts";
 import { watchConfig } from "../utils/config-watcher.ts";
 import { getVersion } from "../utils/version.ts";
 
@@ -310,11 +312,15 @@ export class BacklogServer {
 					"/decisions/*": indexHtml,
 					"/statistics": indexHtml,
 					"/settings": indexHtml,
+					"/quick-task": indexHtml,
 
 					// API Routes using Bun's native route syntax
 					"/api/tasks": {
 						GET: async (req: Request) => await this.handleListTasks(req),
 						POST: async (req: Request) => await this.handleCreateTask(req),
+					},
+					"/api/tasks/next-id": {
+						GET: async () => await this.handleGetNextTaskId(),
 					},
 					"/api/task/:id": {
 						GET: async (req: Request & { params: { id: string } }) => await this.handleGetTask(req.params.id),
@@ -400,6 +406,10 @@ export class BacklogServer {
 					"/api/search": {
 						GET: async (req: Request) => await this.handleSearch(req),
 					},
+					"/api/screenshots": {
+						GET: async () => await this.handleListScreenshots(),
+						POST: async (req: Request) => await this.handleUploadScreenshot(req),
+					},
 					"/sequences": {
 						GET: async () => await this.handleGetSequences(),
 					},
@@ -415,6 +425,10 @@ export class BacklogServer {
 					// Serve files placed under backlog/assets at /assets/<relative-path>
 					"/assets/*": {
 						GET: async (req: Request) => await this.handleAssetRequest(req),
+					},
+					// Serve files placed under backlog/images at /images/<relative-path>
+					"/images/*": {
+						GET: async (req: Request) => await this.handleScreenshotRequest(req),
 					},
 				},
 				fetch: async (req: Request, server: Server<unknown>) => {
@@ -555,14 +569,20 @@ export class BacklogServer {
 	}
 
 	private async handleAssetRequest(req: Request): Promise<Response> {
+		return this.handleBacklogFileRequest(req, "/assets/", "assets");
+	}
+
+	private async handleScreenshotRequest(req: Request): Promise<Response> {
+		return this.handleBacklogFileRequest(req, "/images/", "images");
+	}
+
+	private async handleBacklogFileRequest(req: Request, urlPrefix: string, folderName: string): Promise<Response> {
 		try {
 			const url = new URL(req.url);
 			const pathname = decodeURIComponent(url.pathname || "");
-			const prefix = "/assets/";
-			if (!pathname.startsWith(prefix)) return new Response("Not Found", { status: 404 });
+			if (!pathname.startsWith(urlPrefix)) return new Response("Not Found", { status: 404 });
 
-			// Path relative to backlog/assets
-			const relPath = pathname.slice(prefix.length);
+			const relPath = pathname.slice(urlPrefix.length);
 
 			// disallow traversal
 			if (relPath.includes("..")) return new Response("Not Found", { status: 404 });
@@ -570,10 +590,10 @@ export class BacklogServer {
 			// derive backlog root from docsDir (parent of backlog/docs)
 			const docsDir = this.core.filesystem.docsDir;
 			const backlogRoot = dirname(docsDir);
-			const assetsRoot = join(backlogRoot, "assets");
-			const filePath = join(assetsRoot, relPath);
+			const rootDir = join(backlogRoot, folderName);
+			const filePath = join(rootDir, relPath);
 
-			if (!filePath.startsWith(assetsRoot)) return new Response("Not Found", { status: 404 });
+			if (!filePath.startsWith(rootDir)) return new Response("Not Found", { status: 404 });
 
 			const file = Bun.file(filePath);
 			if (!(await file.exists())) return new Response("Not Found", { status: 404 });
@@ -596,7 +616,7 @@ export class BacklogServer {
 			const mime = mimeMap[ext] ?? "application/octet-stream";
 			return new Response(file, { headers: { "Content-Type": mime } });
 		} catch (error) {
-			console.error("Error serving asset:", error);
+			console.error(`Error serving file from ${folderName}:`, error);
 			return new Response("Internal Server Error", { status: 500 });
 		}
 	}
@@ -620,6 +640,46 @@ export class BacklogServer {
 			return new Response(faviconFile, {
 				headers: { "Content-Type": "image/png" },
 			});
+		}
+
+		// Bun HTMLBundle currently emits asset URLs like "/../../chunk-*.js" for this layout.
+		// Browsers normalize those to "/chunk-*.js", which then miss route matching and 404.
+		// Attempt to resolve normalized bundle asset paths by internally retrying with the
+		// original bundle prefix.
+		if (
+			(req.method === "GET" || req.method === "HEAD") &&
+			req.headers.get("x-backlog-asset-proxy") !== "1" &&
+			!pathname.startsWith("/api/") &&
+			!pathname.startsWith("/assets/") &&
+			!pathname.startsWith("/images/") &&
+			!pathname.startsWith("/favicon")
+		) {
+			const normalizedName = pathname.startsWith("/") ? pathname.slice(1) : pathname;
+			if (normalizedName && !normalizedName.startsWith("../")) {
+				const maybeAssetName = normalizedName.split("/").pop() ?? normalizedName;
+				const directCandidates = [normalizedName];
+				// Handle accidental prefixed paths like /ITSM-PLATFORM/cloud-forge/chunk-*.js
+				if (/^(chunk-[^/]+|favicon-[^/]+\.png)$/i.test(maybeAssetName)) {
+					directCandidates.unshift(maybeAssetName);
+				}
+				for (const candidate of directCandidates) {
+					const prefixedUrl = new URL(url.toString());
+					prefixedUrl.pathname = `/../../${candidate}`;
+					try {
+						const forwarded = await fetch(prefixedUrl.toString(), {
+							method: req.method,
+							headers: {
+								"x-backlog-asset-proxy": "1",
+							},
+						});
+						if (forwarded.ok) {
+							return forwarded;
+						}
+					} catch {
+						// ignore and continue to next candidate
+					}
+				}
+			}
 		}
 
 		// For all other routes, return 404 since routes should handle all valid paths
@@ -968,6 +1028,195 @@ export class BacklogServer {
 		return Response.json(statuses);
 	}
 
+	private async handleGetNextTaskId(): Promise<Response> {
+		try {
+			const id = await this.core.generateNextId(EntityType.Task);
+			return Response.json({ id });
+		} catch (error) {
+			console.error("Error generating next task id:", error);
+			return Response.json({ error: "Failed to generate next task id" }, { status: 500 });
+		}
+	}
+
+	private async handleListScreenshots(): Promise<Response> {
+		try {
+			const docsDir = this.core.filesystem.docsDir;
+			const backlogRoot = dirname(docsDir);
+			const imagesRoot = join(backlogRoot, "images");
+			const screenshotPaths = await this.collectImagePaths(imagesRoot);
+			return Response.json(screenshotPaths);
+		} catch (error) {
+			console.error("Error listing screenshots:", error);
+			return Response.json([]);
+		}
+	}
+
+	private sanitizeScreenshotName(value: string): string {
+		const base = value
+			.trim()
+			.replace(/\\/g, "/")
+			.split("/")
+			.pop()
+			?.replace(/[<>:"/\\|?*]/g, "")
+			.replace(/\s+/g, "-")
+			.replace(/[^a-zA-Z0-9._-]/g, "-")
+			.replace(/-+/g, "-")
+			.replace(/^\.+/, "")
+			.replace(/\.+$/, "");
+		return base && base.length > 0 ? base.slice(0, 120) : "screenshot";
+	}
+
+	private inferScreenshotExtension(mimeType: string, fallbackFilename?: string): string {
+		const fromFilename = (fallbackFilename ?? "")
+			.trim()
+			.toLowerCase()
+			.match(/\.([a-z0-9]+)$/)?.[1];
+		if (fromFilename && /^[a-z0-9]+$/.test(fromFilename)) {
+			return fromFilename;
+		}
+		switch (mimeType.toLowerCase()) {
+			case "image/png":
+				return "png";
+			case "image/jpeg":
+				return "jpg";
+			case "image/webp":
+				return "webp";
+			case "image/gif":
+				return "gif";
+			case "image/svg+xml":
+				return "svg";
+			case "image/avif":
+				return "avif";
+			default:
+				return "png";
+		}
+	}
+
+	private buildTaskScreenshotStem(taskIdRaw: string): string {
+		const normalized = stripPrefix(taskIdRaw.trim().toLowerCase())
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/-+/g, "-")
+			.replace(/^-+/, "")
+			.replace(/-+$/, "");
+		const taskBody = normalized.length > 0 ? normalized : "unknown";
+		return `task-${taskBody}`;
+	}
+
+	private async getNextTaskScreenshotIndex(imagesRoot: string, stem: string): Promise<number> {
+		const screenshotPaths = await this.collectImagePaths(imagesRoot);
+		const escapedStem = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const pattern = new RegExp(`^${escapedStem}-screenshot-(\\d+)\\.[a-z0-9]+$`, "i");
+		let maxIndex = 0;
+		for (const screenshotPath of screenshotPaths) {
+			const filename = screenshotPath.split("/").pop() ?? screenshotPath;
+			const match = filename.match(pattern);
+			if (!match?.[1]) {
+				continue;
+			}
+			const parsed = Number.parseInt(match[1], 10);
+			if (Number.isFinite(parsed) && parsed > maxIndex) {
+				maxIndex = parsed;
+			}
+		}
+		return maxIndex + 1;
+	}
+
+	private async handleUploadScreenshot(req: Request): Promise<Response> {
+		try {
+			const formData = await req.formData();
+			const file = formData.get("file");
+			if (!(file instanceof File)) {
+				return Response.json({ error: "Missing file upload" }, { status: 400 });
+			}
+			if (!file.type.startsWith("image/")) {
+				return Response.json({ error: "Uploaded file must be an image" }, { status: 400 });
+			}
+
+			const requestedFilenameRaw = typeof formData.get("filename") === "string" ? String(formData.get("filename")) : "";
+			const prefixRaw = typeof formData.get("prefix") === "string" ? String(formData.get("prefix")) : "";
+			const taskIdRaw = typeof formData.get("taskId") === "string" ? String(formData.get("taskId")) : "";
+			const prefix = this.sanitizeScreenshotName(prefixRaw)
+				.toLowerCase()
+				.replace(/\.[a-z0-9]+$/i, "")
+				.replace(/^-+/, "")
+				.replace(/-+$/, "");
+
+			const docsDir = this.core.filesystem.docsDir;
+			const backlogRoot = dirname(docsDir);
+			const imagesRoot = join(backlogRoot, "images");
+			await mkdir(imagesRoot, { recursive: true });
+
+			const preferredNameRaw = requestedFilenameRaw || file.name || "screenshot";
+			const extension = this.inferScreenshotExtension(file.type, preferredNameRaw || file.name);
+			let finalName: string;
+
+			if (taskIdRaw.trim().length > 0) {
+				const taskStem = this.buildTaskScreenshotStem(taskIdRaw);
+				let nextIndex = await this.getNextTaskScreenshotIndex(imagesRoot, taskStem);
+				let candidate = `${taskStem}-screenshot-${nextIndex}.${extension}`;
+				// Protect against rare concurrent collisions.
+				while (await Bun.file(join(imagesRoot, candidate)).exists()) {
+					nextIndex += 1;
+					candidate = `${taskStem}-screenshot-${nextIndex}.${extension}`;
+				}
+				finalName = candidate;
+			} else {
+				const preferredName = this.sanitizeScreenshotName(preferredNameRaw).replace(/\.[a-z0-9]+$/i, "");
+				const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+				const randomSuffix = Math.random().toString(36).slice(2, 8);
+				const stemParts = [prefix, preferredName, timestamp, randomSuffix].filter((part) => part.length > 0);
+				finalName = `${stemParts.join("-")}.${extension}`;
+			}
+			const filepath = join(imagesRoot, finalName);
+
+			await Bun.write(filepath, await file.arrayBuffer());
+
+			return Response.json({
+				path: finalName,
+				reference: `backlog/images/${finalName}`,
+				url: `/images/${encodeURIComponent(finalName)}`,
+			});
+		} catch (error) {
+			console.error("Error uploading screenshot:", error);
+			return Response.json({ error: "Failed to upload screenshot" }, { status: 500 });
+		}
+	}
+
+	private async collectImagePaths(rootDir: string): Promise<string[]> {
+		const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif"]);
+		const collected: string[] = [];
+		const walk = async (currentDir: string): Promise<void> => {
+			let entries: Array<{ name: string; isDirectory: () => boolean; isFile: () => boolean }> = [];
+			try {
+				entries = await readdir(currentDir, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			for (const entry of entries) {
+				const fullPath = join(currentDir, entry.name);
+				if (entry.isDirectory()) {
+					await walk(fullPath);
+					continue;
+				}
+				if (!entry.isFile()) {
+					continue;
+				}
+				const lowerName = entry.name.toLowerCase();
+				const extension = lowerName.includes(".") ? lowerName.slice(lowerName.lastIndexOf(".")) : "";
+				if (!imageExtensions.has(extension)) {
+					continue;
+				}
+				const relPath = relative(rootDir, fullPath).replace(/\\/g, "/");
+				if (relPath.length > 0 && !relPath.includes("..")) {
+					collected.push(relPath);
+				}
+			}
+		};
+		await walk(rootDir);
+		collected.sort((a, b) => a.localeCompare(b));
+		return collected;
+	}
+
 	// Documentation handlers
 	private async handleListDocs(): Promise<Response> {
 		try {
@@ -982,6 +1231,8 @@ export class BacklogServer {
 				updatedDate: doc.updatedDate,
 				lastModified: doc.updatedDate || doc.createdDate,
 				tags: doc.tags || [],
+				path: doc.path,
+				isLegacy: doc.isLegacy ?? doc.path?.replace(/\\/g, "/").toLowerCase().startsWith("legacy/") ?? false,
 			}));
 			return Response.json(docFiles);
 		} catch (error) {
@@ -1004,11 +1255,13 @@ export class BacklogServer {
 	}
 
 	private async handleCreateDoc(req: Request): Promise<Response> {
-		const { filename, content } = await req.json();
+		const { filename, content, isLegacy } = await req.json();
 
 		try {
 			const title = filename.replace(".md", "");
-			const document = await this.core.createDocumentWithId(title, content);
+			const document = await this.core.createDocumentWithId(title, content, {
+				subPath: isLegacy ? "legacy" : "",
+			});
 			return Response.json({ success: true, id: document.id }, { status: 201 });
 		} catch (error) {
 			console.error("Error creating document:", error);
@@ -1021,6 +1274,7 @@ export class BacklogServer {
 			const body = await req.json();
 			const content = typeof body?.content === "string" ? body.content : undefined;
 			const title = typeof body?.title === "string" ? body.title : undefined;
+			const isLegacy = typeof body?.isLegacy === "boolean" ? body.isLegacy : undefined;
 
 			if (typeof content !== "string") {
 				return Response.json({ error: "Document content is required" }, { status: 400 });
@@ -1041,6 +1295,16 @@ export class BacklogServer {
 			}
 
 			const nextDoc = normalizedTitle ? { ...existingDoc, title: normalizedTitle } : { ...existingDoc };
+			if (typeof isLegacy === "boolean") {
+				const currentPath = nextDoc.path?.replace(/\\/g, "/") ?? "";
+				const currentSegments = currentPath.split("/").filter((segment) => segment.length > 0);
+				const filename = currentSegments.pop() ?? "";
+				const normalizedSegments = currentSegments.filter((segment) => segment.toLowerCase() !== "legacy");
+				if (filename.length > 0) {
+					nextDoc.path = [...(isLegacy ? ["legacy"] : []), ...normalizedSegments, filename].join("/");
+				}
+				nextDoc.isLegacy = isLegacy;
+			}
 
 			await this.core.updateDocument(nextDoc, content);
 			return Response.json({ success: true });
@@ -1272,7 +1536,7 @@ export class BacklogServer {
 				return Response.json({ error: "A milestone with this title or ID already exists" }, { status: 400 });
 			}
 
-			const milestone = await this.core.filesystem.createMilestone(title, body.description);
+			const milestone = await this.core.createMilestone(title, body.description);
 			return Response.json(milestone, { status: 201 });
 		} catch (error) {
 			console.error("Error creating milestone:", error);

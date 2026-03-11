@@ -636,7 +636,7 @@ export class Core {
 			if (!normalized || existingKeys.has(key)) {
 				continue;
 			}
-			const created = await this.fs.createMilestone(normalized);
+			const created = await this.createMilestone(normalized, undefined, false);
 			const createdIdKey = created.id.trim().toLowerCase();
 			const createdTitleKey = created.title.trim().toLowerCase();
 			if (createdIdKey) {
@@ -829,6 +829,113 @@ export class Core {
 			default:
 				return [];
 		}
+	}
+
+	private async collectCrossBranchIds(
+		relativeDir: string,
+		extractId: (file: string) => string | null,
+	): Promise<string[]> {
+		const config = await this.fs.loadConfig();
+		const ids: string[] = [];
+
+		try {
+			const backlogDir = DEFAULT_DIRECTORIES.BACKLOG;
+			if (config?.remoteOperations === false) {
+				if (process.env.DEBUG) {
+					console.log(`Remote operations disabled - generating IDs from local ${relativeDir} only`);
+				}
+			} else {
+				await this.git.fetch();
+			}
+
+			const branches = await this.git.listAllBranches();
+			const branchResults = await Promise.all(
+				branches.map(async (branch) => {
+					const files = await this.git.listFilesInTree(branch, `${backlogDir}/${relativeDir}`);
+					return files.map(extractId).filter((id): id is string => id !== null);
+				}),
+			);
+
+			for (const branchIds of branchResults) {
+				ids.push(...branchIds);
+			}
+		} catch (error) {
+			if (process.env.DEBUG) {
+				console.error(`Could not fetch ${relativeDir} IDs:`, error);
+			}
+		}
+
+		return ids;
+	}
+
+	private formatSequentialId(prefix: string, nextIdNumber: number, padding?: number): string {
+		if (padding && padding > 0) {
+			return `${prefix}-${String(nextIdNumber).padStart(padding, "0")}`;
+		}
+
+		return `${prefix}-${nextIdNumber}`;
+	}
+
+	private extractMaxNumericSuffix(ids: string[], pattern: RegExp): number {
+		let max = 0;
+		for (const id of ids) {
+			const match = id.match(pattern);
+			if (!match?.[1]) {
+				continue;
+			}
+			const num = Number.parseInt(match[1], 10);
+			if (num > max) {
+				max = num;
+			}
+		}
+		return max;
+	}
+
+	private async generateNextDocumentId(): Promise<string> {
+		const config = await this.fs.loadConfig();
+		const documents = await this.fs.listDocuments();
+		const branchIds = await this.collectCrossBranchIds(DEFAULT_DIRECTORIES.DOCS, (file) => {
+			const match = file.match(/doc-(\d+)/i);
+			return match?.[1] ? `doc-${match[1]}` : null;
+		});
+		const allIds = [...branchIds, ...documents.map((document) => document.id)];
+		const nextIdNumber = this.extractMaxNumericSuffix(allIds, /^doc-(\d+)$/i) + 1;
+
+		return this.formatSequentialId("doc", nextIdNumber, config?.zeroPaddedIds);
+	}
+
+	private async generateNextDecisionId(): Promise<string> {
+		const config = await this.fs.loadConfig();
+		const decisions = await this.fs.listDecisions();
+		const branchIds = await this.collectCrossBranchIds(DEFAULT_DIRECTORIES.DECISIONS, (file) => {
+			const match = file.match(/decision-(\d+)/i);
+			return match?.[1] ? `decision-${match[1]}` : null;
+		});
+		const allIds = [...branchIds, ...decisions.map((decision) => decision.id)];
+		const nextIdNumber = this.extractMaxNumericSuffix(allIds, /^decision-(\d+)$/i) + 1;
+
+		return this.formatSequentialId("decision", nextIdNumber, config?.zeroPaddedIds);
+	}
+
+	private async generateNextMilestoneId(): Promise<string> {
+		const [milestones, archivedMilestones] = await Promise.all([
+			this.fs.listMilestones(),
+			this.fs.listArchivedMilestones(),
+		]);
+		let max = -1;
+
+		for (const milestone of [...milestones, ...archivedMilestones]) {
+			const match = milestone.id.match(/^m-(\d+)$/i);
+			if (!match?.[1]) {
+				continue;
+			}
+			const num = Number.parseInt(match[1], 10);
+			if (num > max) {
+				max = num;
+			}
+		}
+
+		return `m-${max + 1}`;
 	}
 
 	// High-level operations that combine filesystem and git
@@ -2253,23 +2360,27 @@ export class Core {
 		await this.createDecision(updatedDecision, autoCommit);
 	}
 
-	async createDecisionWithTitle(title: string, autoCommit?: boolean): Promise<Decision> {
-		// Import the generateNextDecisionId function from CLI
-		const { generateNextDecisionId } = await import("../cli.js");
-		const id = await generateNextDecisionId(this);
+	async createDecisionWithTitle(
+		title: string,
+		options: {
+			autoCommit?: boolean;
+			status?: Decision["status"];
+		} = {},
+	): Promise<Decision> {
+		const id = await this.generateNextDecisionId();
 
 		const decision: Decision = {
 			id,
 			title,
 			date: new Date().toISOString().slice(0, 16).replace("T", " "),
-			status: "proposed",
+			status: options.status ?? "proposed",
 			context: "[Describe the context and problem that needs to be addressed]",
 			decision: "[Describe the decision that was made]",
 			consequences: "[Describe the consequences of this decision]",
 			rawContent: "",
 		};
 
-		await this.createDecision(decision, autoCommit);
+		await this.createDecision(decision, options.autoCommit);
 		return decision;
 	}
 
@@ -2302,21 +2413,40 @@ export class Core {
 		await this.createDocument(updatedDoc, autoCommit, normalizedSubPath);
 	}
 
-	async createDocumentWithId(title: string, content: string, autoCommit?: boolean): Promise<Document> {
-		// Import the generateNextDocId function from CLI
-		const { generateNextDocId } = await import("../cli.js");
-		const id = await generateNextDocId(this);
+	async createDocumentWithId(
+		title: string,
+		content: string,
+		options: {
+			autoCommit?: boolean;
+			subPath?: string;
+			type?: Document["type"];
+		} = {},
+	): Promise<Document> {
+		const id = await this.generateNextDocumentId();
 
 		const document: Document = {
 			id,
 			title,
-			type: "other" as const,
+			type: options.type ?? "other",
 			createdDate: new Date().toISOString().slice(0, 16).replace("T", " "),
 			rawContent: content,
 		};
 
-		await this.createDocument(document, autoCommit);
+		await this.createDocument(document, options.autoCommit, options.subPath ?? "");
 		return document;
+	}
+
+	async createMilestone(title: string, description?: string, autoCommit?: boolean): Promise<Milestone> {
+		const milestoneId = await this.generateNextMilestoneId();
+		const milestone = await this.fs.createMilestone(title, description, milestoneId);
+
+		if (await this.shouldAutoCommit(autoCommit)) {
+			const backlogDir = await this.getBacklogDirectoryName();
+			const repoRoot = await this.git.stageBacklogDirectory(backlogDir);
+			await this.git.commitChanges(`backlog: Add milestone ${milestone.id}`, repoRoot);
+		}
+
+		return milestone;
 	}
 
 	async initializeProject(projectName: string, autoCommit = false): Promise<void> {

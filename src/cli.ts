@@ -11,7 +11,6 @@ import { type CompletionInstallResult, installCompletion, registerCompletionComm
 import { configureAdvancedSettings } from "./commands/configure-advanced-settings.ts";
 import { registerMcpCommand } from "./commands/mcp.ts";
 import { pickTaskForEditWizard, runTaskCreateWizard, runTaskEditWizard } from "./commands/task-wizard.ts";
-import { DEFAULT_DIRECTORIES } from "./constants/index.ts";
 import { initializeProject } from "./core/init.ts";
 import { buildMilestoneBuckets, collectArchivedMilestoneKeys, milestoneKey } from "./core/milestones.ts";
 import { computeSequences } from "./core/sequences.ts";
@@ -30,17 +29,17 @@ import {
 } from "./index.ts";
 import {
 	type BacklogConfig,
+	type Document as BacklogDocument,
 	type Decision,
 	type DecisionSearchResult,
-	type Document as DocType,
 	type DocumentSearchResult,
-	EntityType,
 	isLocalEditableTask,
 	type Milestone,
 	type SearchPriorityFilter,
 	type SearchResult,
 	type SearchResultType,
 	type Task,
+	type TaskCreateInput,
 	type TaskListFilter,
 	type TaskSearchResult,
 } from "./types/index.ts";
@@ -55,7 +54,6 @@ import { hasAnyPrefix } from "./utils/prefix-config.ts";
 import { type RuntimeCwdResolution, resolveRuntimeCwd } from "./utils/runtime-cwd.ts";
 import { formatValidStatuses, getCanonicalStatus, getValidStatuses } from "./utils/status.ts";
 import {
-	buildDefinitionOfDoneItems,
 	normalizeStringList,
 	parsePositiveIndexList,
 	processAcceptanceCriteriaOptions,
@@ -1116,142 +1114,6 @@ program
 		},
 	);
 
-export async function generateNextDocId(core: Core): Promise<string> {
-	const config = await core.filesystem.loadConfig();
-	// Load local documents
-	const docs = await core.filesystem.listDocuments();
-	const allIds: string[] = [];
-
-	try {
-		const backlogDir = DEFAULT_DIRECTORIES.BACKLOG;
-
-		// Skip remote operations if disabled
-		if (config?.remoteOperations === false) {
-			if (process.env.DEBUG) {
-				console.log("Remote operations disabled - generating ID from local documents only");
-			}
-		} else {
-			await core.gitOps.fetch();
-		}
-
-		const branches = await core.gitOps.listAllBranches();
-
-		// Load files from all branches in parallel
-		const branchFilePromises = branches.map(async (branch) => {
-			const files = await core.gitOps.listFilesInTree(branch, `${backlogDir}/docs`);
-			return files
-				.map((file) => {
-					const match = file.match(/doc-(\d+)/);
-					return match ? `doc-${match[1]}` : null;
-				})
-				.filter((id): id is string => id !== null);
-		});
-
-		const branchResults = await Promise.all(branchFilePromises);
-		for (const branchIds of branchResults) {
-			allIds.push(...branchIds);
-		}
-	} catch (error) {
-		// Suppress errors for offline mode or other git issues
-		if (process.env.DEBUG) {
-			console.error("Could not fetch remote document IDs:", error);
-		}
-	}
-
-	// Add local document IDs
-	for (const doc of docs) {
-		allIds.push(doc.id);
-	}
-
-	// Find the highest numeric ID
-	let max = 0;
-	for (const id of allIds) {
-		const match = id.match(/^doc-(\d+)$/);
-		if (match) {
-			const num = Number.parseInt(match[1] || "0", 10);
-			if (num > max) max = num;
-		}
-	}
-
-	const nextIdNumber = max + 1;
-	const padding = config?.zeroPaddedIds;
-
-	if (padding && typeof padding === "number" && padding > 0) {
-		const paddedId = String(nextIdNumber).padStart(padding, "0");
-		return `doc-${paddedId}`;
-	}
-
-	return `doc-${nextIdNumber}`;
-}
-
-export async function generateNextDecisionId(core: Core): Promise<string> {
-	const config = await core.filesystem.loadConfig();
-	// Load local decisions
-	const decisions = await core.filesystem.listDecisions();
-	const allIds: string[] = [];
-
-	try {
-		const backlogDir = DEFAULT_DIRECTORIES.BACKLOG;
-
-		// Skip remote operations if disabled
-		if (config?.remoteOperations === false) {
-			if (process.env.DEBUG) {
-				console.log("Remote operations disabled - generating ID from local decisions only");
-			}
-		} else {
-			await core.gitOps.fetch();
-		}
-
-		const branches = await core.gitOps.listAllBranches();
-
-		// Load files from all branches in parallel
-		const branchFilePromises = branches.map(async (branch) => {
-			const files = await core.gitOps.listFilesInTree(branch, `${backlogDir}/decisions`);
-			return files
-				.map((file) => {
-					const match = file.match(/decision-(\d+)/);
-					return match ? `decision-${match[1]}` : null;
-				})
-				.filter((id): id is string => id !== null);
-		});
-
-		const branchResults = await Promise.all(branchFilePromises);
-		for (const branchIds of branchResults) {
-			allIds.push(...branchIds);
-		}
-	} catch (error) {
-		// Suppress errors for offline mode or other git issues
-		if (process.env.DEBUG) {
-			console.error("Could not fetch remote decision IDs:", error);
-		}
-	}
-
-	// Add local decision IDs
-	for (const decision of decisions) {
-		allIds.push(decision.id);
-	}
-
-	// Find the highest numeric ID
-	let max = 0;
-	for (const id of allIds) {
-		const match = id.match(/^decision-(\d+)$/);
-		if (match) {
-			const num = Number.parseInt(match[1] || "0", 10);
-			if (num > max) max = num;
-		}
-	}
-
-	const nextIdNumber = max + 1;
-	const padding = config?.zeroPaddedIds;
-
-	if (padding && typeof padding === "number" && padding > 0) {
-		const paddedId = String(nextIdNumber).padStart(padding, "0");
-		return `decision-${paddedId}`;
-	}
-
-	return `decision-${nextIdNumber}`;
-}
-
 function normalizeDependencies(dependencies: unknown): string[] {
 	if (!dependencies) return [];
 
@@ -1274,97 +1136,71 @@ function normalizeDependencies(dependencies: unknown): string[] {
 	return normalizeList(String(dependencies).split(","));
 }
 
-async function validateDependencies(
-	dependencies: string[],
-	core: Core,
-): Promise<{ valid: string[]; invalid: string[] }> {
-	const valid: string[] = [];
-	const invalid: string[] = [];
-
-	if (dependencies.length === 0) {
-		return { valid, invalid };
-	}
-
-	// Load both tasks and drafts to validate dependencies
-	const [tasks, drafts] = await Promise.all([core.queryTasks(), core.fs.listDrafts()]);
-
-	const knownIds = [...tasks.map((task) => task.id), ...drafts.map((draft) => draft.id)];
-	for (const dep of dependencies) {
-		const match = knownIds.find((id) => taskIdsEqual(dep, id));
-		if (match) {
-			valid.push(match);
-		} else {
-			invalid.push(dep);
-		}
-	}
-
-	return { valid, invalid };
-}
-
-function buildTaskFromOptions(id: string, title: string, options: Record<string, unknown>): Task {
+function buildTaskCreateInputFromOptions(title: string, options: Record<string, unknown>): TaskCreateInput {
 	const parentInput = options.parent ? String(options.parent) : undefined;
 	const normalizedParent = parentInput ? normalizeTaskId(parentInput) : undefined;
-
-	const createdDate = new Date().toISOString().slice(0, 16).replace("T", " ");
-
-	// Handle dependencies - they will be validated separately
 	const dependencies = normalizeDependencies(options.dependsOn || options.dep);
-
-	// Handle references (URLs or file paths)
-	const references = normalizeStringList(
-		Array.isArray(options.ref)
-			? options.ref.flatMap((r: string) =>
-					String(r)
-						.split(",")
-						.map((s: string) => s.trim()),
-				)
-			: options.ref
-				? String(options.ref)
-						.split(",")
-						.map((s: string) => s.trim())
-				: [],
-	);
-
-	// Handle documentation (URLs or file paths)
-	const documentation = normalizeStringList(
-		Array.isArray(options.doc)
-			? options.doc.flatMap((d: string) =>
-					String(d)
-						.split(",")
-						.map((s: string) => s.trim()),
-				)
-			: options.doc
-				? String(options.doc)
-						.split(",")
-						.map((s: string) => s.trim())
-				: [],
-	);
+	const references =
+		normalizeStringList(
+			Array.isArray(options.ref)
+				? options.ref.flatMap((r: string) =>
+						String(r)
+							.split(",")
+							.map((s: string) => s.trim()),
+					)
+				: options.ref
+					? String(options.ref)
+							.split(",")
+							.map((s: string) => s.trim())
+					: [],
+		) ?? [];
+	const documentation =
+		normalizeStringList(
+			Array.isArray(options.doc)
+				? options.doc.flatMap((d: string) =>
+						String(d)
+							.split(",")
+							.map((s: string) => s.trim()),
+					)
+				: options.doc
+					? String(options.doc)
+							.split(",")
+							.map((s: string) => s.trim())
+					: [],
+		) ?? [];
 
 	// Validate priority option
 	const priority = options.priority ? String(options.priority).toLowerCase() : undefined;
 	const validPriorities = ["high", "medium", "low"];
 	const validatedPriority =
 		priority && validPriorities.includes(priority) ? (priority as "high" | "medium" | "low") : undefined;
+	const criteria = processAcceptanceCriteriaOptions(options).map((text) => ({ text, checked: false }));
+	const definitionOfDoneAdd = toStringArray(options.dod);
 
 	return {
-		id,
 		title,
-		status: options.status ? String(options.status) : "",
-		assignee: options.assignee ? [String(options.assignee)] : [],
-		createdDate,
-		labels: options.labels
-			? String(options.labels)
-					.split(",")
-					.map((l: string) => l.trim())
-					.filter(Boolean)
-			: [],
-		dependencies,
-		references,
-		documentation,
-		rawContent: "",
+		...(options.status ? { status: String(options.status) } : {}),
+		...(options.assignee ? { assignee: [String(options.assignee)] } : {}),
+		...(options.labels
+			? {
+					labels: String(options.labels)
+						.split(",")
+						.map((label: string) => label.trim())
+						.filter(Boolean),
+				}
+			: {}),
+		...(dependencies.length > 0 ? { dependencies } : {}),
+		...(references.length > 0 ? { references } : {}),
+		...(documentation.length > 0 ? { documentation } : {}),
 		...(options.description || options.desc ? { description: String(options.description || options.desc) } : {}),
 		...(normalizedParent && { parentTaskId: normalizedParent }),
 		...(validatedPriority && { priority: validatedPriority }),
+		...(criteria.length > 0 ? { acceptanceCriteria: criteria } : {}),
+		...(definitionOfDoneAdd.length > 0 ? { definitionOfDoneAdd } : {}),
+		...(options.dodDefaults === false ? { disableDefinitionOfDoneDefaults: true } : {}),
+		...(options.plan ? { implementationPlan: String(options.plan) } : {}),
+		...(options.notes ? { implementationNotes: String(options.notes) } : {}),
+		...(options.finalSummary ? { finalSummary: String(options.finalSummary) } : {}),
 	};
 }
 
@@ -1451,88 +1287,25 @@ taskCmd
 		}
 
 		const createAsDraft = Boolean(options.draft);
-		const id = await core.generateNextId(
-			createAsDraft ? EntityType.Draft : EntityType.Task,
-			createAsDraft ? undefined : options.parent,
-		);
-		const task = buildTaskFromOptions(id, title ?? "", options);
-
-		// Normalize and validate status if provided (case-insensitive)
-		if (options.status) {
-			const canonical = await getCanonicalStatus(String(options.status), core);
-			if (!canonical) {
-				const configuredStatuses = await getValidStatuses(core);
-				console.error(
-					`Invalid status: ${options.status}. Valid statuses are: ${formatValidStatuses(configuredStatuses)}`,
-				);
-				process.exitCode = 1;
-				return;
-			}
-			task.status = canonical;
-		}
-
-		// Validate dependencies if provided
-		if (task.dependencies.length > 0) {
-			const { valid, invalid } = await validateDependencies(task.dependencies, core);
-			if (invalid.length > 0) {
-				console.error(`Error: The following dependencies do not exist: ${invalid.join(", ")}`);
-				console.error("Please create these tasks first or check the task IDs.");
-				process.exitCode = 1;
-				return;
-			}
-			task.dependencies = valid;
-		}
-
-		// Handle acceptance criteria for create command (structured only)
-		const criteria = processAcceptanceCriteriaOptions(options);
-		if (criteria.length > 0) {
-			let idx = 1;
-			task.acceptanceCriteriaItems = criteria.map((text) => ({ index: idx++, text, checked: false }));
-		}
-
-		const config = await core.filesystem.loadConfig();
-		const dodItems = buildDefinitionOfDoneItems({
-			defaults: config?.definitionOfDone,
-			add: toStringArray(options.dod),
-			disableDefaults: options.dodDefaults === false,
-		});
-		if (dodItems) {
-			task.definitionOfDoneItems = dodItems;
-		}
-
-		// Handle implementation plan
-		if (options.plan) {
-			task.implementationPlan = String(options.plan);
-		}
-
-		// Handle implementation notes
-		if (options.notes) {
-			task.implementationNotes = String(options.notes);
-		}
-
-		// Handle final summary
-		if (options.finalSummary) {
-			task.finalSummary = String(options.finalSummary);
-		}
-
 		const usePlainOutput = isPlainRequested(options);
-
+		const createInput = buildTaskCreateInputFromOptions(title ?? "", options);
 		if (createAsDraft) {
-			const filepath = await core.createDraft(task);
+			createInput.status = "Draft";
+		}
+
+		try {
+			const { task, filePath } = await core.createTaskFromInput(createInput);
 			if (usePlainOutput) {
-				console.log(formatTaskPlainText(task, { filePathOverride: filepath }));
+				console.log(formatTaskPlainText(task, { filePathOverride: filePath }));
 				return;
 			}
-			console.log(`Created draft ${task.id}`);
-			console.log(`File: ${filepath}`);
-		} else {
-			const filepath = await core.createTask(task);
-			if (usePlainOutput) {
-				console.log(formatTaskPlainText(task, { filePathOverride: filepath }));
-				return;
+			console.log(`Created ${createAsDraft ? "draft" : "task"} ${task.id}`);
+			if (filePath) {
+				console.log(`File: ${filePath}`);
 			}
-			console.log(`Created task ${task.id}`);
-			console.log(`File: ${filepath}`);
+		} catch (error) {
+			console.error(error instanceof Error ? error.message : String(error));
+			process.exitCode = 1;
 		}
 	});
 
@@ -2532,11 +2305,19 @@ draftCmd
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
 		await core.ensureConfigLoaded();
-		const id = await core.generateNextId(EntityType.Draft);
-		const task = buildTaskFromOptions(id, title, options);
-		const filepath = await core.createDraft(task);
-		console.log(`Created draft ${id}`);
-		console.log(`File: ${filepath}`);
+		try {
+			const { task, filePath } = await core.createTaskFromInput({
+				...buildTaskCreateInputFromOptions(title, options),
+				status: "Draft",
+			});
+			console.log(`Created draft ${task.id}`);
+			if (filePath) {
+				console.log(`File: ${filePath}`);
+			}
+		} catch (error) {
+			console.error(error instanceof Error ? error.message : String(error));
+			process.exitCode = 1;
+		}
 	});
 
 draftCmd
@@ -2917,16 +2698,11 @@ docCmd
 	.action(async (title: string, options) => {
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
-		const id = await generateNextDocId(core);
-		const document: DocType = {
-			id,
-			title: title as string,
-			type: (options.type || "other") as DocType["type"],
-			createdDate: new Date().toISOString().slice(0, 16).replace("T", " "),
-			rawContent: "",
-		};
-		await core.createDocument(document, undefined, options.path || "");
-		console.log(`Created document ${id}`);
+		const document = await core.createDocumentWithId(title, "", {
+			subPath: options.path || "",
+			type: (options.type || "other") as BacklogDocument["type"],
+		});
+		console.log(`Created document ${document.id}`);
 	});
 
 docCmd
@@ -2995,19 +2771,10 @@ decisionCmd
 	.action(async (title: string, options) => {
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
-		const id = await generateNextDecisionId(core);
-		const decision: Decision = {
-			id,
-			title: title as string,
-			date: new Date().toISOString().slice(0, 16).replace("T", " "),
+		const decision = await core.createDecisionWithTitle(title, {
 			status: (options.status || "proposed") as Decision["status"],
-			context: "",
-			decision: "",
-			consequences: "",
-			rawContent: "",
-		};
-		await core.createDecision(decision);
-		console.log(`Created decision ${id}`);
+		});
+		console.log(`Created decision ${decision.id}`);
 	});
 
 // Agents command group

@@ -1,11 +1,11 @@
 ---
 id: BACK-372
 title: 'CI: drop sourcemap in compile-and-smoke-test to avoid InvalidSourceMap flake'
-status: Done
+status: Re-Open
 assignee:
   - '@codex'
 created_date: '2026-01-21 21:26'
-updated_date: '2026-01-21 21:27'
+updated_date: '2026-02-22 23:51'
 labels: []
 dependencies: []
 references:

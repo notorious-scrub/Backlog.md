@@ -20,6 +20,12 @@ export interface ReorderTaskPayload {
 	targetMilestone?: string | null;
 }
 
+export interface UploadedScreenshot {
+	path: string;
+	reference: string;
+	url: string;
+}
+
 // Enhanced error types for better error handling
 export class ApiError extends Error {
 	constructor(
@@ -276,6 +282,52 @@ export class ApiClient {
 		return response.json();
 	}
 
+	async fetchNextTaskId(): Promise<string> {
+		const response = await fetch(`${API_BASE}/tasks/next-id`);
+		if (!response.ok) {
+			throw new Error("Failed to fetch next task id");
+		}
+		const data = (await response.json()) as { id?: string };
+		if (!data.id) {
+			throw new Error("Next task id missing from response");
+		}
+		return data.id;
+	}
+
+	async fetchScreenshots(): Promise<string[]> {
+		const response = await fetch(`${API_BASE}/screenshots`);
+		if (!response.ok) {
+			throw new Error("Failed to fetch screenshots");
+		}
+		return response.json();
+	}
+
+	async uploadScreenshot(
+		file: File,
+		options: { filename?: string; prefix?: string; taskId?: string } = {},
+	): Promise<UploadedScreenshot> {
+		const formData = new FormData();
+		formData.append("file", file);
+		if (options.filename) {
+			formData.append("filename", options.filename);
+		}
+		if (options.prefix) {
+			formData.append("prefix", options.prefix);
+		}
+		if (options.taskId) {
+			formData.append("taskId", options.taskId);
+		}
+		const response = await fetch(`${API_BASE}/screenshots`, {
+			method: "POST",
+			body: formData,
+		});
+		if (!response.ok) {
+			const data = await response.json().catch(() => ({}));
+			throw new Error((data as { error?: string }).error || "Failed to upload screenshot");
+		}
+		return response.json();
+	}
+
 	async fetchConfig(): Promise<BacklogConfig> {
 		const response = await fetch(`${API_BASE}/config`);
 		if (!response.ok) {
@@ -322,10 +374,13 @@ export class ApiClient {
 		return response.json();
 	}
 
-	async updateDoc(filename: string, content: string, title?: string): Promise<void> {
+	async updateDoc(filename: string, content: string, title?: string, isLegacy?: boolean): Promise<void> {
 		const payload: Record<string, unknown> = { content };
 		if (typeof title === "string") {
 			payload.title = title;
+		}
+		if (typeof isLegacy === "boolean") {
+			payload.isLegacy = isLegacy;
 		}
 
 		const response = await fetch(`${API_BASE}/docs/${encodeURIComponent(filename)}`, {
@@ -340,13 +395,13 @@ export class ApiClient {
 		}
 	}
 
-	async createDoc(filename: string, content: string): Promise<{ id: string }> {
+	async createDoc(filename: string, content: string, isLegacy = false): Promise<{ id: string }> {
 		const response = await fetch(`${API_BASE}/docs`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
 			},
-			body: JSON.stringify({ filename, content }),
+			body: JSON.stringify({ filename, content, isLegacy }),
 		});
 		if (!response.ok) {
 			throw new Error("Failed to create document");

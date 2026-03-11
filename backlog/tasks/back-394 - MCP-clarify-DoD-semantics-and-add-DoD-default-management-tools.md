@@ -1,19 +1,27 @@
 ---
 id: BACK-394
 title: 'MCP: clarify DoD semantics and add DoD-default management tools'
-status: Done
+status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-02-21 21:39'
-updated_date: '2026-02-21 22:24'
+updated_date: '2026-02-23 03:39'
 labels: []
 dependencies: []
+references:
+  - backlog/images/capy_birthday.png
 ---
 
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+RE-OPENED at 2026-02-23 03:35:13 UTC
+This isn't finishd
+
+=============
 Agents using Backlog MCP on external projects can misread task-level DoD fields as if they should recreate project-level DoD per task. Add MCP tools to manage project Definition of Done defaults, and clarify MCP task/tool guidance so task-level DoD is clearly optional and distinct from project defaults.
+
+review screenshots: capy_birthday
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

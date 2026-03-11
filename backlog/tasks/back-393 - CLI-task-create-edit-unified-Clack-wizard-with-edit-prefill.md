@@ -1,11 +1,11 @@
 ---
 id: BACK-393
 title: 'CLI task create/edit: unified Clack wizard with edit prefill'
-status: Done
+status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-02-20 23:29'
-updated_date: '2026-02-21 20:02'
+updated_date: '2026-02-23 03:38'
 labels: []
 dependencies: []
 references:
@@ -22,6 +22,12 @@ priority: medium
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+RE-OPENED at 2026-02-23 03:38:06 UTC
+
+Get to work
+
+=============
+
 Why: current task create/task edit require correctly composed args and fail fast when required positional args are missing, which hurts interactive UX.
 What: add one shared wizard engine for both create and edit; task edit preloads current task values, and both commands use the same field and validation logic under the hood.
 <!-- SECTION:DESCRIPTION:END -->

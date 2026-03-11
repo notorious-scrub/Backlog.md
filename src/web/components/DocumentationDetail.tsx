@@ -8,6 +8,7 @@ import ErrorBoundary from '../components/ErrorBoundary';
 import {SuccessToast} from './SuccessToast';
 import { useTheme } from '../contexts/ThemeContext';
 import { sanitizeUrlTitle } from '../utils/urlHelpers';
+import { isLegacyDocument } from '../utils/documents';
 
 // Custom MDEditor wrapper for proper height handling
 const MarkdownEditor = memo(function MarkdownEditor({
@@ -82,6 +83,8 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
     const [saveError, setSaveError] = useState<Error | null>(null);
     const [isNewDocument, setIsNewDocument] = useState(false);
     const [showSaveSuccess, setShowSaveSuccess] = useState(false);
+    const [isLegacy, setIsLegacy] = useState(false);
+    const [originalIsLegacy, setOriginalIsLegacy] = useState(false);
 
     useEffect(() => {
         if (id === 'new') {
@@ -93,6 +96,8 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
             setOriginalDocTitle('');
             setContent('');
             setOriginalContent('');
+            setIsLegacy(false);
+            setOriginalIsLegacy(false);
         } else if (id) {
             setIsNewDocument(false);
             setIsEditing(false); // Ensure we start in preview mode for existing documents
@@ -130,6 +135,9 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
                 setOriginalContent(fullDoc.rawContent || '');
                 setDocTitle(fullDoc.title || '');
                 setOriginalDocTitle(fullDoc.title || '');
+                const nextIsLegacy = isLegacyDocument(fullDoc);
+                setIsLegacy(nextIsLegacy);
+                setOriginalIsLegacy(nextIsLegacy);
                 // Update document state with full data
                 setDocument(fullDoc);
             } catch (fetchError) {
@@ -142,6 +150,9 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
                     setDocument(doc);
                     setDocTitle(doc.title || '');
                     setOriginalDocTitle(doc.title || '');
+                    const nextIsLegacy = isLegacyDocument(doc);
+                    setIsLegacy(nextIsLegacy);
+                    setOriginalIsLegacy(nextIsLegacy);
                 }
             }
         } catch (err) {
@@ -166,7 +177,7 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
 
             if (isNewDocument) {
                 // Create new document
-                const result = await apiClient.createDoc(normalizedTitle, content);
+                const result = await apiClient.createDoc(normalizedTitle, content, isLegacy);
                 // Refresh data and navigate to the new document
                 await onRefreshData();
                 // Show success toast
@@ -177,6 +188,7 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
                 setIsNewDocument(false);
                 setDocTitle(normalizedTitle);
                 setOriginalDocTitle(normalizedTitle);
+                setOriginalIsLegacy(isLegacy);
                 // Use the returned document ID for navigation
                 const documentId = result.id.replace('doc-', ''); // Remove prefix for URL
                 navigate(`/documentation/${documentId}/${sanitizeUrlTitle(normalizedTitle)}`);
@@ -191,7 +203,8 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
                 await apiClient.updateDoc(
                     addDocPrefix(id),
                     content,
-                    titleChanged ? normalizedTitle : undefined
+                    titleChanged ? normalizedTitle : undefined,
+                    isLegacy
                 );
 
                 // Update original title to the new value
@@ -199,6 +212,7 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
                     setDocTitle(normalizedTitle);
                     setOriginalDocTitle(normalizedTitle);
                 }
+                setOriginalIsLegacy(isLegacy);
 
                 // Refresh data from parent
                 await onRefreshData();
@@ -230,11 +244,12 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
             // Revert changes for existing documents
             setContent(originalContent);
             setDocTitle(originalDocTitle);
+            setIsLegacy(originalIsLegacy);
             setIsEditing(false);
         }
     };
 
-    const hasChanges = content !== originalContent || docTitle !== originalDocTitle;
+    const hasChanges = content !== originalContent || docTitle !== originalDocTitle || isLegacy !== originalIsLegacy;
 
     if (!id) {
         return (
@@ -297,6 +312,11 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
                                         </svg>
                                         <span>Documentation</span>
                                     </div>
+                                    {isLegacy && (
+                                        <div className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                                            Legacy
+                                        </div>
+                                    )}
                                     {document?.createdDate && (
                                         <div className="flex items-center space-x-2">
                                             <svg className="w-4 h-4" fill="none" stroke="currentColor"
@@ -323,7 +343,16 @@ export default function DocumentationDetail({docs, onRefreshData}: Documentation
                                         Edit
                                     </button>
                                 ) : (
-                                    <div className="flex items-center space-x-2">
+                                    <div className="flex items-center space-x-3">
+	                                        <label className="inline-flex items-center space-x-2 text-sm text-gray-700 dark:text-gray-300">
+	                                            <input
+	                                                type="checkbox"
+	                                                checked={isLegacy}
+	                                                onChange={(e) => setIsLegacy(e.target.checked)}
+	                                                className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 dark:border-gray-600"
+	                                            />
+	                                            <span>Legacy document</span>
+	                                        </label>
 	                                        <button
 	                                            onClick={handleCancelEdit}
 	                                            className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500 dark:focus:ring-gray-400 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-colors duration-200"

@@ -186,6 +186,7 @@ export interface Document {
 	name?: string;
 	path?: string;
 	lastModified?: string;
+	isLegacy?: boolean;
 }
 
 export type SearchResultType = "task" | "document" | "decision";
@@ -257,6 +258,7 @@ export interface BacklogConfig {
 	defaultAssignee?: string;
 	defaultReporter?: string;
 	statuses: string[];
+	statusColors?: Record<string, string>;
 	labels: string[];
 	/** @deprecated Milestones are sourced from milestone files, not config. */
 	milestones?: string[];

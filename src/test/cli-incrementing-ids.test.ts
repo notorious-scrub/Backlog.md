@@ -57,6 +57,21 @@ describe("CLI ID Incrementing Behavior", () => {
 		expect(task2?.title).toBe("Second Task");
 	});
 
+	test("should continue task numbering after the first task is completed", async () => {
+		const { task: firstTask } = await core.createTaskFromInput({ title: "Completed Task" });
+		const completed = await core.completeTask(firstTask.id);
+		expect(completed).toBe(true);
+
+		const result = await $`bun ${CLI_PATH} task create "Task After Completion"`.cwd(TEST_DIR).quiet();
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout.toString()).toContain("Created task TASK-2");
+
+		const task2 = await core.filesystem.loadTask("task-2");
+		expect(task2).toBeDefined();
+		expect(task2?.title).toBe("Task After Completion");
+	});
+
 	test("should increment document IDs correctly", async () => {
 		const doc1: Document = {
 			id: "doc-1",

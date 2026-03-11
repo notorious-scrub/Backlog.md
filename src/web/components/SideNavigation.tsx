@@ -15,6 +15,7 @@ import { SidebarSkeleton } from './LoadingSpinner';
 import { sanitizeUrlTitle } from '../utils/urlHelpers';
 import { getWebVersion } from '../utils/version';
 import { apiClient } from '../lib/api';
+import { splitDocumentsByLegacy } from '../utils/documents';
 
 // Utility functions for ID transformations
 const stripIdPrefix = (id: string): string => {
@@ -179,6 +180,10 @@ const SideNavigation = memo(function SideNavigation({
 		// Auto-collapse if more than 6 documents
 		return docs.length > 6;
 	});
+	const [isLegacyDocsCollapsed, setIsLegacyDocsCollapsed] = useState(() => {
+		const saved = localStorage.getItem('legacyDocsCollapsed');
+		return saved !== null ? JSON.parse(saved) : true;
+	});
 	const [isDecisionsCollapsed, setIsDecisionsCollapsed] = useState(() => {
 		const saved = localStorage.getItem('decisionsCollapsed');
 		if (saved !== null) {
@@ -213,6 +218,10 @@ const SideNavigation = memo(function SideNavigation({
 	useEffect(() => {
 		localStorage.setItem('docsCollapsed', JSON.stringify(isDocsCollapsed));
 	}, [isDocsCollapsed]);
+
+	useEffect(() => {
+		localStorage.setItem('legacyDocsCollapsed', JSON.stringify(isLegacyDocsCollapsed));
+	}, [isLegacyDocsCollapsed]);
 
 	// Save decisions collapse state to localStorage
 	useEffect(() => {
@@ -323,6 +332,7 @@ const SideNavigation = memo(function SideNavigation({
 	// Always show full lists in their sections, search results are separate
 	const filteredDocs = docs;
 	const filteredDecisions = decisions;
+	const { activeDocs, legacyDocs } = useMemo(() => splitDocumentsByLegacy(filteredDocs), [filteredDocs]);
 
 	const toggleCollapse = useCallback(() => {
 		setIsCollapsed((prev: any) => !prev);
@@ -584,7 +594,7 @@ const SideNavigation = memo(function SideNavigation({
 											{isDocsCollapsed ? <Icons.ChevronRight /> : <Icons.ChevronDown />}
 									</button>
 									<span className="text-gray-500 dark:text-gray-400"><Icons.Document /></span>
-									<span className="text-sm font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-400 whitespace-nowrap">Documents ({docs.length})</span>
+									<span className="text-sm font-semibold uppercase tracking-wider text-gray-600 dark:text-gray-400 whitespace-nowrap">Documents ({activeDocs.length})</span>
 								</div>
 									<button
 										onClick={handleCreateDocument}
@@ -604,22 +614,59 @@ const SideNavigation = memo(function SideNavigation({
 									{filteredDocs.length === 0 ? (
 										<p className="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">No documents</p>
 									) : (
-										filteredDocs.map((doc) => (
-											<NavLink
-												key={doc.id}
-												to={`/documentation/${stripIdPrefix(doc.id)}/${sanitizeUrlTitle(doc.title)}`}
-												className={({ isActive }) =>
-													`flex items-center space-x-3 px-3 py-2 text-sm rounded-lg transition-colors duration-200 ${
-														isActive
-															? 'bg-blue-50 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 font-medium'
-															: 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
-													}`
-												}
-											>
-												<span className="text-gray-400 dark:text-gray-500"><Icons.DocumentPage /></span>
-												<span className="truncate">{doc.title}</span>
-											</NavLink>
-										))
+										<>
+											{activeDocs.map((doc) => (
+												<NavLink
+													key={doc.id}
+													to={`/documentation/${stripIdPrefix(doc.id)}/${sanitizeUrlTitle(doc.title)}`}
+													className={({ isActive }) =>
+														`flex items-center space-x-3 px-3 py-2 text-sm rounded-lg transition-colors duration-200 ${
+															isActive
+																? 'bg-blue-50 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 font-medium'
+																: 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
+														}`
+													}
+												>
+													<span className="text-gray-400 dark:text-gray-500"><Icons.DocumentPage /></span>
+													<span className="truncate">{doc.title}</span>
+												</NavLink>
+											))}
+											{legacyDocs.length > 0 && (
+												<div className="pt-2">
+													<button
+														type="button"
+														onClick={() => setIsLegacyDocsCollapsed((prev: boolean) => !prev)}
+														className="flex w-full items-center space-x-2 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 transition-colors duration-200 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+														title={isLegacyDocsCollapsed ? "Expand legacy documents" : "Collapse legacy documents"}
+													>
+														<span className="text-gray-400 dark:text-gray-500">
+															{isLegacyDocsCollapsed ? <Icons.ChevronRight /> : <Icons.ChevronDown />}
+														</span>
+														<span>Legacy ({legacyDocs.length})</span>
+													</button>
+													{!isLegacyDocsCollapsed && (
+														<div className="mt-1 space-y-1">
+															{legacyDocs.map((doc) => (
+																<NavLink
+																	key={doc.id}
+																	to={`/documentation/${stripIdPrefix(doc.id)}/${sanitizeUrlTitle(doc.title)}`}
+																	className={({ isActive }) =>
+																		`flex items-center space-x-3 px-3 py-2 text-sm rounded-lg transition-colors duration-200 ${
+																			isActive
+																				? 'bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 font-medium'
+																				: 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
+																		}`
+																	}
+																>
+																	<span className="text-amber-500 dark:text-amber-400"><Icons.DocumentPage /></span>
+																	<span className="truncate">{doc.title}</span>
+																</NavLink>
+															))}
+														</div>
+													)}
+												</div>
+											)}
+										</>
 									)}
 								</div>
 							)}

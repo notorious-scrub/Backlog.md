@@ -34,7 +34,7 @@ export function generateTaskCreateSchema(config: BacklogConfig): JsonSchema {
 			title: {
 				type: "string",
 				minLength: 1,
-				maxLength: 200,
+				maxLength: 500,
 			},
 			description: {
 				type: "string",
@@ -138,7 +138,7 @@ export function generateTaskEditSchema(config: BacklogConfig): JsonSchema {
 			},
 			title: {
 				type: "string",
-				maxLength: 200,
+				maxLength: 500,
 			},
 			description: {
 				type: "string",

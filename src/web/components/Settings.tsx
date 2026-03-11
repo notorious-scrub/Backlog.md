@@ -1,7 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { apiClient } from '../lib/api';
-import { SuccessToast } from './SuccessToast';
-import type { BacklogConfig } from '../../types';
+import React, { useState, useEffect } from "react";
+import { apiClient } from "../lib/api";
+import { SuccessToast } from "./SuccessToast";
+import type { BacklogConfig } from "../../types";
+import {
+	getDefaultStatusColor,
+	normalizeHexColor,
+	normalizeStatusColorMap,
+} from "../utils/status-colors";
 
 const Settings: React.FC = () => {
 	const [config, setConfig] = useState<BacklogConfig | null>(null);
@@ -10,52 +15,142 @@ const Settings: React.FC = () => {
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [showSuccess, setShowSuccess] = useState(false);
-	const [statuses, setStatuses] = useState<string[]>([]);
+	const [newStatus, setNewStatus] = useState("");
 	const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
 
 	useEffect(() => {
 		loadConfig();
-		loadStatuses();
 	}, []);
+
+	const normalizeStatuses = (items: string[] | undefined): string[] => {
+		const unique = new Set<string>();
+		for (const value of items ?? []) {
+			const trimmed = value.trim();
+			if (trimmed.length > 0) {
+				unique.add(trimmed);
+			}
+		}
+		return Array.from(unique);
+	};
+
+	const normalizeStatusColors = (statuses: string[], colors: Record<string, string> | undefined): Record<string, string> => {
+		return normalizeStatusColorMap(statuses, colors);
+	};
 
 	const loadConfig = async () => {
 		try {
 			setLoading(true);
 			const data = await apiClient.fetchConfig();
-			setConfig(data);
-			setOriginalConfig(data);
+			const normalizedStatuses = normalizeStatuses(data.statuses);
+			const defaultStatus = normalizedStatuses.includes(data.defaultStatus ?? "")
+				? data.defaultStatus
+				: normalizedStatuses[0];
+			const normalizedData = {
+				...data,
+				statuses: normalizedStatuses.length > 0 ? normalizedStatuses : ["To Do", "In Progress", "Done"],
+				defaultStatus: defaultStatus ?? "To Do",
+				statusColors: normalizeStatusColors(
+					normalizedStatuses.length > 0 ? normalizedStatuses : ["To Do", "In Progress", "Done"],
+					data.statusColors,
+				),
+			};
+			setConfig(normalizedData);
+			setOriginalConfig(normalizedData);
 			setError(null);
 		} catch (err) {
-			setError(err instanceof Error ? err.message : 'Failed to load configuration');
+			setError(err instanceof Error ? err.message : "Failed to load configuration");
 		} finally {
 			setLoading(false);
 		}
 	};
 
-	const loadStatuses = async () => {
-		try {
-			const data = await apiClient.fetchStatuses();
-			setStatuses(data);
-		} catch (err) {
-			console.error('Failed to load statuses:', err);
-		}
-	};
-
-	const handleInputChange = (field: keyof BacklogConfig, value: any) => {
-		if (!config) return;
-		
-		setConfig({
-			...config,
-			[field]: value
+	const handleInputChange = <K extends keyof BacklogConfig>(field: K, value: BacklogConfig[K]) => {
+		setConfig((current) => {
+			if (!current) return current;
+			return {
+				...current,
+				[field]: value,
+			};
 		});
 
 		// Clear validation error for this field
-		if (validationErrors[field]) {
-			setValidationErrors({
-				...validationErrors,
-				[field]: ''
-			});
+		setValidationErrors((current) => {
+			if (!current[field]) return current;
+			return {
+				...current,
+				[field]: "",
+			};
+		});
+	};
+
+	const handleStatusChange = (index: number, value: string) => {
+		if (!config) return;
+		const nextStatuses = [...config.statuses];
+		const previousStatus = nextStatuses[index] ?? "";
+		nextStatuses[index] = value;
+		handleInputChange("statuses", nextStatuses);
+		const nextStatusColors = { ...(config.statusColors ?? {}) };
+		if (previousStatus !== value) {
+			const previousColor = nextStatusColors[previousStatus];
+			delete nextStatusColors[previousStatus];
+			const normalizedNextColor = normalizeHexColor(previousColor ?? "");
+			if (value.trim()) {
+				nextStatusColors[value] = normalizedNextColor ?? getDefaultStatusColor(value);
+			}
 		}
+		handleInputChange("statusColors", normalizeStatusColors(nextStatuses, nextStatusColors));
+	};
+
+	const handleStatusColorChange = (status: string, color: string) => {
+		if (!config) return;
+		const normalized = normalizeHexColor(color);
+		if (!normalized) return;
+		const next = {
+			...(config.statusColors ?? {}),
+			[status]: normalized,
+		};
+		handleInputChange("statusColors", next);
+	};
+
+	const handleAddStatus = () => {
+		if (!config) return;
+		const trimmedStatus = newStatus.trim();
+		if (!trimmedStatus || config.statuses.includes(trimmedStatus)) {
+			return;
+		}
+		handleInputChange("statuses", [...config.statuses, trimmedStatus]);
+		handleInputChange("statusColors", {
+			...(config.statusColors ?? {}),
+			[trimmedStatus]: getDefaultStatusColor(trimmedStatus),
+		});
+		setNewStatus("");
+	};
+
+	const handleRemoveStatus = (index: number) => {
+		if (!config) return;
+		const removedStatus = config.statuses[index];
+		const nextStatuses = config.statuses.filter((_, statusIndex) => statusIndex !== index);
+		const normalizedStatuses = normalizeStatuses(nextStatuses);
+		const fallbackStatuses = normalizedStatuses.length > 0 ? normalizedStatuses : ["To Do", "In Progress", "Done"];
+		handleInputChange("statuses", fallbackStatuses);
+		handleInputChange("statusColors", normalizeStatusColors(fallbackStatuses, config.statusColors));
+		if (config.defaultStatus === removedStatus) {
+			handleInputChange("defaultStatus", fallbackStatuses[0] ?? "To Do");
+		}
+	};
+
+	const handleMoveStatus = (fromIndex: number, toIndex: number) => {
+		if (!config) return;
+		if (toIndex < 0 || toIndex >= config.statuses.length || fromIndex === toIndex) {
+			return;
+		}
+		const nextStatuses = [...config.statuses];
+		const [moved] = nextStatuses.splice(fromIndex, 1);
+		if (!moved) {
+			return;
+		}
+		nextStatuses.splice(toIndex, 0, moved);
+		handleInputChange("statuses", nextStatuses);
 	};
 
 	const normalizeDefinitionOfDone = (items: string[] | undefined): string[] | undefined => {
@@ -70,14 +165,24 @@ const Settings: React.FC = () => {
 
 		// Validate project name
 		if (!config.projectName.trim()) {
-			errors.projectName = 'Project name is required';
+			errors.projectName = "Project name is required";
 		}
 
 		// Validate port number
 		if (config.defaultPort && (config.defaultPort < 1 || config.defaultPort > 65535)) {
-			errors.defaultPort = 'Port must be between 1 and 65535';
+			errors.defaultPort = "Port must be between 1 and 65535";
 		}
 
+		const normalizedStatuses = normalizeStatuses(config.statuses);
+		if (normalizedStatuses.length === 0) {
+			errors.statuses = "At least one status is required";
+		}
+
+		if ((config.defaultStatus ?? "").trim().length === 0) {
+			errors.defaultStatus = "Default status is required";
+		} else if (normalizedStatuses.length > 0 && !normalizedStatuses.includes(config.defaultStatus ?? "")) {
+			errors.defaultStatus = "Default status must be one of your configured statuses";
+		}
 
 		setValidationErrors(errors);
 		return Object.keys(errors).length === 0;
@@ -88,8 +193,16 @@ const Settings: React.FC = () => {
 
 		try {
 			setSaving(true);
+			const normalizedStatuses = normalizeStatuses(config.statuses);
+			const fallbackStatuses = normalizedStatuses.length > 0 ? normalizedStatuses : ["To Do", "In Progress", "Done"];
+			const normalizedDefaultStatus = fallbackStatuses.includes(config.defaultStatus ?? "")
+				? config.defaultStatus
+				: fallbackStatuses[0];
 			const normalizedConfig = {
 				...config,
+				statuses: fallbackStatuses,
+				defaultStatus: normalizedDefaultStatus,
+				statusColors: normalizeStatusColors(fallbackStatuses, config.statusColors),
 				definitionOfDone: normalizeDefinitionOfDone(config.definitionOfDone),
 			};
 			await apiClient.updateConfig(normalizedConfig);
@@ -99,7 +212,7 @@ const Settings: React.FC = () => {
 			setTimeout(() => setShowSuccess(false), 3000);
 			setError(null);
 		} catch (err) {
-			setError(err instanceof Error ? err.message : 'Failed to save configuration');
+			setError(err instanceof Error ? err.message : "Failed to save configuration");
 		} finally {
 			setSaving(false);
 		}
@@ -236,16 +349,104 @@ const Settings: React.FC = () => {
 								</label>
 								<select
 									id="defaultStatus"
-									value={config.defaultStatus}
+									value={config.defaultStatus || ""}
 									onChange={(e) => handleInputChange('defaultStatus', e.target.value)}
-									className="w-full h-10 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 transition-colors duration-200"
+									className={`w-full h-10 px-3 py-2 border rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 transition-colors duration-200 ${
+										validationErrors.defaultStatus
+											? "border-red-500 dark:border-red-400"
+											: "border-gray-300 dark:border-gray-600"
+									}`}
 								>
-									{statuses.map(status => (
+									{config.statuses.map((status) => (
 										<option key={status} value={status}>{status}</option>
 									))}
 								</select>
+								{validationErrors.defaultStatus && (
+									<p className="mt-1 text-sm text-red-600 dark:text-red-400">{validationErrors.defaultStatus}</p>
+								)}
 								<p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
 									Default status for new tasks
+								</p>
+							</div>
+
+							<div>
+								<label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+									Custom Statuses
+								</label>
+								<div className="space-y-2">
+									{config.statuses.map((status, index) => (
+										<div key={`status-${index}`} className="flex items-center gap-2">
+											<input
+												type="color"
+												value={config.statusColors?.[status] ?? getDefaultStatusColor(status)}
+												onChange={(e) => handleStatusColorChange(status, e.target.value)}
+												className="h-10 w-12 p-1 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700"
+												aria-label={`Color for status ${status || index + 1}`}
+											/>
+											<input
+												type="text"
+												value={status}
+												onChange={(e) => handleStatusChange(index, e.target.value)}
+												className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 bg-white dark:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 transition-colors duration-200"
+												placeholder="Status name"
+											/>
+											<button
+												type="button"
+												onClick={() => handleMoveStatus(index, index - 1)}
+												disabled={index === 0}
+												className="px-2 py-2 text-sm text-gray-600 dark:text-gray-300 hover:underline disabled:opacity-40"
+												aria-label={`Move ${status} up`}
+												title="Move up"
+											>
+												↑
+											</button>
+											<button
+												type="button"
+												onClick={() => handleMoveStatus(index, index + 1)}
+												disabled={index === config.statuses.length - 1}
+												className="px-2 py-2 text-sm text-gray-600 dark:text-gray-300 hover:underline disabled:opacity-40"
+												aria-label={`Move ${status} down`}
+												title="Move down"
+											>
+												↓
+											</button>
+											<button
+												type="button"
+												onClick={() => handleRemoveStatus(index)}
+												className="px-3 py-2 text-sm text-red-600 dark:text-red-400 hover:underline"
+											>
+												Remove
+											</button>
+										</div>
+									))}
+									<div className="flex items-center gap-2 pt-1">
+										<input
+											type="text"
+											value={newStatus}
+											onChange={(e) => setNewStatus(e.target.value)}
+											onKeyDown={(e) => {
+												if (e.key === "Enter") {
+													e.preventDefault();
+													handleAddStatus();
+												}
+											}}
+											className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-gray-100 bg-white dark:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 transition-colors duration-200"
+											placeholder="Add a status"
+										/>
+										<button
+											type="button"
+											onClick={handleAddStatus}
+											className="px-3 py-2 text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline"
+										>
+											Add
+										</button>
+									</div>
+								</div>
+								{validationErrors.statuses && (
+									<p className="mt-1 text-sm text-red-600 dark:text-red-400">{validationErrors.statuses}</p>
+								)}
+								<p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+									Statuses define your board columns and task workflow. Use the arrows to control kanban column order.
 								</p>
 							</div>
 

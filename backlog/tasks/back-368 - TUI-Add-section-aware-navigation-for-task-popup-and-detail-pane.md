@@ -5,11 +5,14 @@ status: To Do
 assignee:
   - '@codex'
 created_date: '2026-01-19 21:32'
+updated_date: '2026-02-22 23:51'
 labels:
   - tui
   - ux
   - enhancement
 dependencies: []
+references:
+  - backlog/images/chef_Sean.png
 documentation:
   - src/ui/board.ts
   - src/ui/task-viewer-with-search.ts
@@ -26,6 +29,8 @@ Scrolling long task details is slow and disorienting in the TUI. Users lose cont
 
 ### What
 Provide section-aware navigation in both the kanban task popup and the task list detail pane so users can quickly jump between structured sections and see where they are in the document. Navigation should rely on common keys (not Page Up/Down), and the UI should indicate the current/next section as the user scrolls.
+
+review screenshots: chef_Sean
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -6,6 +6,8 @@ import { buildMilestoneBuckets, collectArchivedMilestoneKeys, isDoneStatus } fro
 import { type Milestone, type MilestoneBucket, type Task } from "../../types";
 import MilestoneTaskRow from "./MilestoneTaskRow";
 import Modal from "./Modal";
+import { getClipboardImageFiles } from "../utils/clipboard-images";
+import { toScreenshotReference } from "../utils/screenshots";
 
 interface MilestoneSearchEntry {
 	id: string;
@@ -57,6 +59,10 @@ const MilestonesPage: React.FC<MilestonesPageProps> = ({
 	onRefreshData,
 }) => {
 	const [newMilestone, setNewMilestone] = useState("");
+	const [newMilestoneDescription, setNewMilestoneDescription] = useState("");
+	const [milestoneReferences, setMilestoneReferences] = useState<string[]>([]);
+	const [newReferenceInput, setNewReferenceInput] = useState("");
+	const [isUploadingMilestoneScreenshot, setIsUploadingMilestoneScreenshot] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [success, setSuccess] = useState<string | null>(null);
 	const [isSaving, setIsSaving] = useState(false);
@@ -217,7 +223,63 @@ const MilestonesPage: React.FC<MilestonesPageProps> = ({
 	const closeAddModal = () => {
 		setShowAddModal(false);
 		setNewMilestone("");
+		setNewMilestoneDescription("");
+		setMilestoneReferences([]);
+		setNewReferenceInput("");
+		setIsUploadingMilestoneScreenshot(false);
 		setError(null);
+	};
+
+	const normalizeReferenceList = (input: string[]): string[] => {
+		const unique = new Set<string>();
+		for (const value of input) {
+			const trimmed = value.trim();
+			if (trimmed.length > 0) {
+				unique.add(trimmed);
+			}
+		}
+		return Array.from(unique);
+	};
+
+	const appendMilestoneReferencesToDescription = (description: string, references: string[]): string => {
+		const base = description.trim();
+		const normalizedReferences = normalizeReferenceList(references);
+		if (normalizedReferences.length === 0) {
+			return base;
+		}
+		const referenceLines = normalizedReferences.map((reference) => `- ${reference}`).join("\n");
+		const referenceBlock = `References:\n${referenceLines}`;
+		return base ? `${base}\n\n${referenceBlock}` : referenceBlock;
+	};
+
+	const handleMilestoneReferencePaste = async (event: React.ClipboardEvent<HTMLInputElement>) => {
+		const pastedImages = getClipboardImageFiles(event.clipboardData);
+		if (pastedImages.length === 0) {
+			return;
+		}
+		event.preventDefault();
+		setError(null);
+		setIsUploadingMilestoneScreenshot(true);
+		try {
+			const uploads = await Promise.all(
+				pastedImages.map((file, index) =>
+					apiClient.uploadScreenshot(file, {
+						prefix: "milestone",
+						filename: `milestone-pasted-${Date.now()}-${index + 1}`,
+					}),
+				),
+			);
+			const uploadedReferences = uploads
+				.map((upload) => toScreenshotReference(upload.path))
+				.filter((value): value is string => Boolean(value));
+			if (uploadedReferences.length > 0) {
+				setMilestoneReferences((current) => normalizeReferenceList([...current, ...uploadedReferences]));
+			}
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "Failed to upload pasted screenshot");
+		} finally {
+			setIsUploadingMilestoneScreenshot(false);
+		}
 	};
 
 	const handleAddMilestone = async (event?: React.FormEvent<HTMLFormElement>) => {
@@ -233,8 +295,12 @@ const MilestonesPage: React.FC<MilestonesPageProps> = ({
 		setError(null);
 		setSuccess(null);
 		try {
-			await apiClient.createMilestone(value);
+			const description = appendMilestoneReferencesToDescription(newMilestoneDescription, milestoneReferences);
+			await apiClient.createMilestone(value, description || undefined);
 			setNewMilestone("");
+			setNewMilestoneDescription("");
+			setMilestoneReferences([]);
+			setNewReferenceInput("");
 			setSuccess(`Added milestone "${value}"`);
 			setShowAddModal(false);
 			if (onRefreshData) {
@@ -739,6 +805,67 @@ const MilestonesPage: React.FC<MilestonesPageProps> = ({
 							className="w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
 						/>
 						{error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
+					</div>
+					<div className="space-y-2">
+						<label className="text-sm font-medium text-gray-900 dark:text-gray-100">Description</label>
+						<textarea
+							value={newMilestoneDescription}
+							onChange={(e) => setNewMilestoneDescription(e.target.value)}
+							placeholder="Optional milestone description"
+							rows={4}
+							className="w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+						/>
+					</div>
+					<div className="space-y-2">
+						<label className="text-sm font-medium text-gray-900 dark:text-gray-100">References</label>
+						<div className="flex gap-2">
+							<input
+								type="text"
+								value={newReferenceInput}
+								onChange={(e) => setNewReferenceInput(e.target.value)}
+								onPaste={(event) => {
+									void handleMilestoneReferencePaste(event);
+								}}
+								placeholder="URL or file path..."
+								className="flex-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+							/>
+							<button
+								type="button"
+								onClick={() => {
+									const nextValue = newReferenceInput.trim();
+									if (!nextValue) return;
+									setMilestoneReferences((current) => normalizeReferenceList([...current, nextValue]));
+									setNewReferenceInput("");
+								}}
+								className="px-3 py-2 rounded-md text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 transition-colors"
+							>
+								Add
+							</button>
+						</div>
+						<p className="text-xs text-gray-500 dark:text-gray-400">
+							Paste image from clipboard in this field to upload it to `backlog/images` and auto-add its reference.
+							{isUploadingMilestoneScreenshot ? " Uploading..." : ""}
+						</p>
+						{milestoneReferences.length > 0 && (
+							<ul className="space-y-1">
+								{milestoneReferences.map((reference, index) => (
+									<li key={`${reference}-${index}`} className="flex items-center gap-2">
+										<code className="flex-1 text-xs rounded bg-gray-100 dark:bg-gray-700 px-2 py-1 break-all text-gray-700 dark:text-gray-200">
+											{reference}
+										</code>
+										<button
+											type="button"
+											onClick={() => {
+												setMilestoneReferences((current) => current.filter((_, idx) => idx !== index));
+											}}
+											className="text-xs text-red-600 dark:text-red-400 hover:underline"
+										>
+											Remove
+										</button>
+									</li>
+								))}
+							</ul>
+						)}
 					</div>
 					<div className="flex justify-end gap-2">
 						<button

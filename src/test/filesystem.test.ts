@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdir, readdir, rename, stat } from "node:fs/promises";
+import { mkdir, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { FileSystem } from "../file-system/operations.ts";
 import { serializeTask } from "../markdown/serializer.ts";
@@ -383,6 +383,24 @@ Invalid content`,
 			const loaded = await filesystem.loadConfig();
 			expect(loaded?.defaultReporter).toBe("@author");
 		});
+
+		it("should persist status colors in config", async () => {
+			const cfg: BacklogConfig = {
+				projectName: "Status Colors",
+				statuses: ["To Do", "On Hold", "Done"],
+				statusColors: {
+					"To Do": "#6b7280",
+					"On Hold": "#ff9900",
+					Done: "#16a34a",
+				},
+				labels: [],
+				dateFormat: "yyyy-mm-dd",
+			};
+
+			await filesystem.saveConfig(cfg);
+			const loaded = await filesystem.loadConfig();
+			expect(loaded?.statusColors).toEqual(cfg.statusColors);
+		});
 	});
 
 	describe("user config operations", () => {
@@ -574,6 +592,45 @@ Invalid content`,
 			expect(nested?.path).toBe(join("guides", "doc-3 - Nested-Guide.md"));
 		});
 
+		it("stores legacy documents under docs/legacy and exposes legacy metadata", async () => {
+			await filesystem.saveDocument(
+				{
+					...sampleDocument,
+					id: "doc-4",
+					title: "Legacy Guide",
+				},
+				"legacy",
+			);
+
+			const docs = await filesystem.listDocuments();
+			const legacyDoc = docs.find((doc) => doc.id === "doc-4");
+			expect(legacyDoc?.path).toBe(join("legacy", "doc-4 - Legacy-Guide.md"));
+			expect(legacyDoc?.isLegacy).toBe(true);
+		});
+
+		it("moves a document out of legacy when saved without the legacy path", async () => {
+			await filesystem.saveDocument(
+				{
+					...sampleDocument,
+					id: "doc-5",
+					title: "Legacy Migration",
+				},
+				"legacy",
+			);
+
+			await filesystem.saveDocument({
+				...sampleDocument,
+				id: "doc-5",
+				title: "Legacy Migration",
+				path: join("legacy", "doc-5 - Legacy-Migration.md"),
+			});
+
+			const docs = await filesystem.listDocuments();
+			const migratedDoc = docs.find((doc) => doc.id === "doc-5");
+			expect(migratedDoc?.path).toBe("doc-5 - Legacy-Migration.md");
+			expect(migratedDoc?.isLegacy).toBe(false);
+		});
+
 		it("should load documents using flexible ID formats", async () => {
 			await filesystem.saveDocument({
 				...sampleDocument,
@@ -599,6 +656,39 @@ Invalid content`,
 				new Bun.Glob("doc-*.md").scan({ cwd: filesystem.docsDir, followSymlinks: true }),
 			);
 			expect(canonicalFiles.some((file) => file.startsWith("doc-0009"))).toBe(true);
+		});
+
+		it("lists plain markdown docs without frontmatter using derived id/title", async () => {
+			const legacyPath = join(filesystem.docsDir, "Architecture-Overview.md");
+			await writeFile(
+				legacyPath,
+				`# Architecture Overview
+
+This is a legacy markdown document without frontmatter.
+`,
+			);
+
+			const docs = await filesystem.listDocuments();
+			const legacyDoc = docs.find((doc) => doc.title === "Architecture Overview");
+			expect(legacyDoc).toBeDefined();
+			expect(legacyDoc?.id).toBe("doc-architecture-overview");
+		});
+
+		it("includes markdown documents from root documents directory", async () => {
+			const legacyDocsDir = join(TEST_DIR, "documents");
+			await mkdir(legacyDocsDir, { recursive: true });
+			await writeFile(
+				join(legacyDocsDir, "Runbook.md"),
+				`# Runbook
+
+Operational notes.
+`,
+			);
+
+			const docs = await filesystem.listDocuments();
+			const runbook = docs.find((doc) => doc.title === "Runbook");
+			expect(runbook).toBeDefined();
+			expect(runbook?.id).toBe("doc-runbook");
 		});
 	});
 

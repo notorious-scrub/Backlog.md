@@ -26,6 +26,14 @@
 - `bun run cli config get <key>` - Get a specific config value (e.g. defaultEditor)
 - `bun run cli config set <key> <value>` - Set a config value with validation
 
+### Backlog CLI: milestones
+
+In a Backlog.md project, use **`backlog milestone …`** for files under `backlog/milestones/` (avoid hand-editing). Link work with `backlog task create/edit --milestone`, bulk `backlog task milestone <ids…> --milestone "…"` or `--clear`, list with `backlog task list -m …`, and search with `backlog search … --milestone …`.
+
+Common commands: `backlog milestone --help`, `backlog milestone list --plain` (optional `--show-completed`, `--discovery`), `backlog milestone view … --plain`, `backlog milestone add` / `milestone edit`, `backlog milestone rename`, `backlog milestone remove … --tasks …`, `backlog milestone archive …`. Use **`--plain`** for machine-readable output.
+
+Details: [backlog-cli.md](backlog-cli.md), [CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md).
+
 ## Core Structure
 
 - **CLI Tool**: Built with Bun and TypeScript as a global npm package (`npm i -g backlog.md`)

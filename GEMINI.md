@@ -63,6 +63,18 @@ If you can simplify the code, do it.
 - `bun run cli config get <key>` - Get a specific config value (e.g. defaultEditor)
 - `bun run cli config set <key> <value>` - Set a config value with validation
 
+### Backlog CLI: milestones
+
+In a Backlog.md project, use the **`backlog`** command for milestones (files under `backlog/milestones/`). Prefer CLI over manual edits.
+
+- **Help:** `backlog milestone --help`
+- **List / view:** `backlog milestone list --plain` (optional `--show-completed`, `--discovery`); `backlog milestone view m-0 --plain` or `backlog milestone view "Title" --plain`
+- **Add / edit:** `backlog milestone add "…" -d "…" --plain` or `backlog milestone add`; `backlog milestone edit "…" -d "…" --plain` or `backlog milestone edit`
+- **Rename / remove / archive:** `backlog milestone rename "Old" "New" --plain` (optional `--no-update-tasks`); `backlog milestone remove "…" --tasks clear|keep|reassign` (`--reassign-to` with `reassign`); `backlog milestone archive m-3`
+- **Link tasks:** `task create/edit` with `--milestone` or `--clear-milestone`; bulk `task milestone <ids…> --milestone "…"` or `--clear`; filter `task list -m …`; search `--milestone` on `backlog search`
+
+Use **`--plain`** for scripts and agents. See [backlog-cli.md](backlog-cli.md) and [CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md).
+
 ## Core Structure
 
 - **CLI Tool**: Built with Bun and TypeScript as a global npm package (`npm i -g backlog.md`)

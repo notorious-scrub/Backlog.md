@@ -81,6 +81,20 @@ CLAUDECODE=1 bun test --timeout 180000 # Full test suite (failures-only output)
 - `bun run cli config get <key>` - Get specific value (e.g. defaultEditor)
 - `bun run cli config set <key> <value>` - Set with validation
 
+### Backlog CLI: milestones
+
+In a Backlog.md project directory, use the **`backlog`** CLI (installed as `backlog.md`). Milestones are Markdown under `backlog/milestones/`; manage them with **`backlog milestone …`** so metadata and task links stay consistent.
+
+- **Help:** `backlog milestone --help`
+- **List / inspect:** `backlog milestone list --plain` (optional `--show-completed`, `--discovery`); `backlog milestone view m-0 --plain` or `backlog milestone view "Release 1.0" --plain`
+- **Create / edit:** `backlog milestone add "…" -d "…" --plain` or interactive `backlog milestone add`; `backlog milestone edit "…" -d "…" --plain` or `backlog milestone edit`
+- **Rename / remove / archive:** `backlog milestone rename "Old" "New" --plain` (optional `--no-update-tasks`); `backlog milestone remove "…" --tasks clear|keep|reassign` (use `--reassign-to` with `reassign`); `backlog milestone archive m-3`
+- **Tasks:** `task create --milestone`, `task edit --milestone` / `--clear-milestone` / `--no-milestone`, bulk `task milestone <ids…> --milestone "…"` or `--clear`, `task list -m …`, `backlog search … --milestone … --plain`
+
+Multi-line milestone descriptions use the same shell rules as task `--desc` / `--plan` / `--notes` (see **CLI Multi-line Input** below). Prefer **`--plain`** for automation.
+
+Quick reference: [backlog-cli.md](backlog-cli.md) · Full tables: [CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md).
+
 ## Core Structure
 - **CLI Tool**: Built with Bun and TypeScript as a global npm package (`npm i -g backlog.md`)
 - **Source Code**: Located in `/src` directory with modular TypeScript structure

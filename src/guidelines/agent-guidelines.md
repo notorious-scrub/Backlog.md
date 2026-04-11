@@ -18,6 +18,7 @@ remains fully synchronized and up-to-date.
 - ✅ **Dependencies**: Task relationships and subtask hierarchies
 - ✅ **Documentation & Decisions**: Structured docs and architectural decision records
 - ✅ **Export & Reporting**: Generate markdown reports and board snapshots
+- ✅ **Milestones**: Create, list, view, rename, archive, and attach tasks via `backlog milestone …` and task flags
 - ✅ **AI-Optimized**: `--plain` flag provides clean text output for AI processing
 
 ### Why This Matters to You (AI Agent)
@@ -58,6 +59,7 @@ remains fully synchronized and up-to-date.
 
 - Markdown task files live under **`backlog/tasks/`** (drafts under **`backlog/drafts/`**)
 - Files are named: `task-<id> - <title>.md` (e.g., `task-42 - Add GraphQL resolver.md`)
+- Milestone records live under **`backlog/milestones/`** as Markdown files (managed with `backlog milestone …`)
 - Project documentation is in **`backlog/docs/`**
 - Project decisions are in **`backlog/decisions/`**
 
@@ -170,6 +172,10 @@ PR-style summary of what was implemented.
 | Add Final Summary       | `backlog task edit 42 --final-summary "PR-style summary"` |
 | Append Final Summary    | `backlog task edit 42 --append-final-summary "Another detail"` |
 | Clear Final Summary     | `backlog task edit 42 --clear-final-summary` |
+| Set milestone on task   | `backlog task edit 42 --milestone "Release 1.0"` |
+| Clear milestone on task | `backlog task edit 42 --clear-milestone` (alias: `--no-milestone`) |
+| Bulk set milestone      | `backlog task milestone 42 43 --milestone "Release 1.0"` |
+| Bulk clear milestone    | `backlog task milestone 42 43 --clear` |
 
 ---
 
@@ -413,6 +419,33 @@ backlog task edit 42 --final-summary "Refactored using strategy pattern, updated
 backlog task edit 42 -s Done
 ```
 
+### 6.1 Milestones (CLI)
+
+Milestones are Markdown files under `backlog/milestones/`. Prefer **`backlog milestone …`** and task flags over hand-editing those files so IDs, front matter, and task links stay consistent.
+
+**Task ↔ milestone**
+
+- Set on create: `backlog task create "Title" --milestone "Release 1.0"`
+- Set or clear on one task: `backlog task edit <id> --milestone "Release 1.0"` or `--clear-milestone` / `--no-milestone`
+- Bulk: `backlog task milestone <ids...> --milestone "…"` or `… --clear`
+- List tasks in a milestone: `backlog task list -m "Release 1.0" --plain`; tasks with no milestone: `-m none`
+- Search: `backlog search "topic" --milestone "Release 1.0" --plain` or `--milestone none` with `--type task`
+
+**Milestone records**
+
+- Overview: `backlog milestone --help`
+- List: `backlog milestone list --plain` (add `--show-completed`, `--discovery` as needed)
+- View one: `backlog milestone view m-0 --plain` or `backlog milestone view "Release 1.0" --plain`
+- Add: `backlog milestone add "Release 1.0" -d "Scope" --plain` or `backlog milestone add` (TTY wizard)
+- Edit description: `backlog milestone edit "Release 1.0" -d "…" --plain` or `backlog milestone edit` (wizard)
+- Rename (updates matching tasks by default): `backlog milestone rename "Old" "New" --plain`; skip task updates: `--no-update-tasks`
+- Remove (archive + task cleanup): `backlog milestone remove "Name" --tasks clear|keep|reassign` (with `--reassign-to` when using `reassign`)
+- Archive only: `backlog milestone archive m-3`
+
+Use **`--plain`** for script- and agent-friendly output. Multi-line milestone descriptions follow the same shell rules as task description/plan/notes (see **Multi‑line Input** below).
+
+For a compact cheat sheet, see **[backlog-cli.md](backlog-cli.md)**; for the full tables, **[CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md)**.
+
 ---
 
 ## 7. Definition of Done (DoD)
@@ -451,6 +484,8 @@ backlog search "login" --type task --plain
 # Search with filters
 backlog search "api" --status "In Progress" --plain
 backlog search "bug" --priority high --plain
+backlog search "ship" --milestone "Release 1.0" --plain
+backlog search --type task --milestone none --plain
 ```
 
 **Key points:**
@@ -497,6 +532,7 @@ backlog search "bug" --priority high --plain
 | With references  | `backlog task create "Title" --ref src/api.ts --ref https://github.com/issue/123`   |
 | With documentation | `backlog task create "Title" --doc https://design-docs.example.com`               |
 | With all options | `backlog task create "Title" -d "Desc" -a @sara -s "To Do" -l auth --priority high --ref src/api.ts --doc docs/spec.md` |
+| With milestone   | `backlog task create "Title" --milestone "Release 1.0"`                           |
 | Create draft     | `backlog task create "Title" --draft`                                               |
 | Create subtask   | `backlog task create "Title" -p 42`                                                 |
 
@@ -510,6 +546,10 @@ backlog search "bug" --priority high --plain
 | Assign           | `backlog task edit 42 -a @sara`             |
 | Add labels       | `backlog task edit 42 -l backend,api`       |
 | Set priority     | `backlog task edit 42 --priority high`      |
+| Set milestone    | `backlog task edit 42 --milestone "Release 1.0"` |
+| Clear milestone  | `backlog task edit 42 --clear-milestone`    |
+| Bulk set milestone | `backlog task milestone 42 43 --milestone "Release 1.0"` |
+| Bulk clear milestone | `backlog task milestone 42 43 --clear`   |
 
 ### Acceptance Criteria Management
 
@@ -536,6 +576,22 @@ backlog search "bug" --priority high --plain
 | Add references   | `backlog task edit 42 --ref src/api.ts --ref https://github.com/issue/123` |
 | Add documentation | `backlog task edit 42 --doc https://design-docs.example.com --doc docs/spec.md` |
 
+### Milestones (records under `backlog/milestones/`)
+
+| Action | Command |
+|--------|---------|
+| Help | `backlog milestone --help` |
+| List | `backlog milestone list --plain` |
+| List + completed buckets | `backlog milestone list --show-completed --plain` |
+| List + discovery | `backlog milestone list --discovery --plain` |
+| View | `backlog milestone view m-0 --plain` or `backlog milestone view "Release 1.0" --plain` |
+| Add | `backlog milestone add "Release 1.0" -d "Scope" --plain` |
+| Edit description | `backlog milestone edit "Release 1.0" -d "…" --plain` |
+| Rename | `backlog milestone rename "Old" "New" --plain` |
+| Rename, no task updates | `backlog milestone rename "Old" "New" --no-update-tasks --plain` |
+| Remove (archive + tasks) | `backlog milestone remove "Name" --tasks clear` (or `keep`, `reassign` + `--reassign-to`) |
+| Archive only | `backlog milestone archive m-3` |
+
 ### Multi‑line Input (Description/Plan/Notes/Final Summary)
 
 The CLI preserves input literally. Shells do not convert `\n` inside normal quotes. Use one of the following to insert real newlines:
@@ -547,6 +603,7 @@ The CLI preserves input literally. Shells do not convert `\n` inside normal quot
   - Append notes: `backlog task edit 42 --append-notes $'Progress update line 1\nLine 2'`
   - Final summary: `backlog task edit 42 --final-summary $'Shipped A\nAdded B'`
   - Append final summary: `backlog task edit 42 --append-final-summary $'Added X\nAdded Y'`
+- Milestone description on add/edit: `backlog milestone add "R1" -d $'Line1\nLine2' --plain`
 - POSIX portable (printf):
   - `backlog task edit 42 --notes "$(printf 'Line1\nLine2')"`
 - PowerShell (backtick n):
@@ -554,7 +611,7 @@ The CLI preserves input literally. Shells do not convert `\n` inside normal quot
 
 Do not expect `"...\n..."` to become a newline. That passes the literal backslash + n to the CLI by design.
 
-Descriptions support literal newlines; shell examples may show escaped `\\n`, but enter a single `\n` to create a newline.
+Descriptions support literal newlines; shell examples may show escaped `\\n`, but enter a single `\n` to create a newline. The same rules apply to **`backlog milestone add` / `milestone edit` `-d`** values.
 
 ### Implementation Notes Formatting
 
@@ -599,6 +656,8 @@ Tests:
 | Search with filter | `backlog search "api" --status "To Do" --plain` |
 | Filter by status   | `backlog task list -s "In Progress" --plain` |
 | Filter by assignee | `backlog task list -a @sara --plain`         |
+| Filter by milestone | `backlog task list -m "Release 1.0" --plain` |
+| Tasks with no milestone | `backlog task list -m none --plain`    |
 | Archive task       | `backlog task archive 42`                    |
 | Demote to draft    | `backlog task demote 42`                     |
 

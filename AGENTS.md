@@ -67,6 +67,18 @@ If you can simplify the code, do it.
 - `bun run cli config get <key>` - Get a specific config value (e.g. defaultEditor)
 - `bun run cli config set <key> <value>` - Set a config value with validation
 
+### Backlog CLI: milestones
+
+When working in a Backlog.md project (not this repo’s `bun run cli` dev wrapper), use the **`backlog`** command. Milestones live under `backlog/milestones/`; prefer CLI over editing those files by hand.
+
+- **Help:** `backlog milestone --help`
+- **List / inspect:** `backlog milestone list --plain` (optional `--show-completed`, `--discovery`); `backlog milestone view m-0 --plain` or `backlog milestone view "Release 1.0" --plain`
+- **Create / edit:** `backlog milestone add "…" -d "…" --plain` or `backlog milestone add` (TTY wizard); `backlog milestone edit "…" -d "…" --plain` or `backlog milestone edit` (wizard)
+- **Rename / remove / archive:** `backlog milestone rename "Old" "New" --plain` (optional `--no-update-tasks`); `backlog milestone remove "…" --tasks clear|keep|reassign` (with `--reassign-to` for `reassign`); `backlog milestone archive m-3`
+- **Tasks:** `--milestone` on `task create` / `draft create`; `task edit --milestone` / `--clear-milestone` / `--no-milestone`; bulk `task milestone <ids…> --milestone "…"` or `--clear`; list `task list -m <name|none>`; search `backlog search "…" --milestone "…" --plain`
+
+Use **`--plain`** for deterministic, agent-friendly output. Short cheat sheet: [backlog-cli.md](backlog-cli.md). Full reference: [CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md).
+
 ## Core Structure
 
 - **CLI Tool**: Built with Bun and TypeScript as a global npm package (`npm i -g backlog.md`)

@@ -24,6 +24,8 @@ export const DEFAULT_DIRECTORIES = {
 	DECISIONS: "decisions",
 	/** Milestones directory */
 	MILESTONES: "milestones",
+	/** Append-only audit log directory */
+	AUDIT_LOG: "audit-log",
 } as const;
 
 /**
@@ -34,6 +36,8 @@ export const DEFAULT_FILES = {
 	CONFIG: "config.yml",
 	/** Local user settings file */
 	USER: ".user",
+	/** Append-only audit event stream */
+	AUDIT_EVENTS: "events.jsonl",
 } as const;
 
 /**

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { rename as moveFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_DIRECTORIES, DEFAULT_STATUSES, FALLBACK_STATUS } from "../constants/index.ts";
@@ -14,6 +15,8 @@ import {
 	type SearchFilters,
 	type Sequence,
 	type Task,
+	type TaskAuditActor,
+	type TaskAuditEvent,
 	type TaskCreateInput,
 	type TaskListFilter,
 	type TaskUpdateInput,
@@ -21,6 +24,7 @@ import {
 import { normalizeAssignee } from "../utils/assignee.ts";
 import { documentIdsEqual } from "../utils/document-id.ts";
 import { openInEditor } from "../utils/editor.ts";
+import { resolveMilestoneInputFromLists } from "../utils/milestone-input.ts";
 import { buildIdRegex, extractAnyPrefix, getPrefixForType, normalizeId } from "../utils/prefix-config.ts";
 import {
 	getCanonicalStatus as resolveCanonicalStatus,
@@ -37,8 +41,10 @@ import {
 import { getTaskFilename, getTaskPath, normalizeTaskId, taskIdsEqual } from "../utils/task-path.ts";
 import { attachSubtaskSummaries } from "../utils/task-subtasks.ts";
 import { upsertTaskUpdatedDate } from "../utils/task-updated-date.ts";
+import { handleAutomatedQaTaskChange } from "./automated-qa.ts";
 import { migrateConfig, needsMigration } from "./config-migration.ts";
 import { ContentStore } from "./content-store.ts";
+import { milestoneKey } from "./milestones.ts";
 import { migrateDraftPrefixes, needsDraftPrefixMigration } from "./prefix-migration.ts";
 import { calculateNewOrdinal, DEFAULT_ORDINAL_STEP, resolveOrdinalConflicts } from "./reorder.ts";
 import { SearchService } from "./search-service.ts";
@@ -179,7 +185,11 @@ export class Core {
 		return this.searchService;
 	}
 
-	private applyTaskFilters(tasks: Task[], filters?: TaskListFilter): Task[] {
+	private applyTaskFilters(
+		tasks: Task[],
+		filters?: TaskListFilter,
+		milestoneResolution?: { active: Milestone[]; archived: Milestone[] },
+	): Task[] {
 		if (!filters) {
 			return tasks;
 		}
@@ -210,6 +220,21 @@ export class Core {
 					return requiredLabels.some((label) => labelSet.has(label));
 				});
 			}
+		}
+		if (filters.withoutMilestone) {
+			result = result.filter((task) => !(task.milestone ?? "").trim());
+		}
+		if (filters.milestoneId && milestoneResolution) {
+			const targetKey = milestoneKey(filters.milestoneId);
+			const { active, archived } = milestoneResolution;
+			result = result.filter((task) => {
+				const raw = (task.milestone ?? "").trim();
+				if (!raw) {
+					return false;
+				}
+				const resolved = resolveMilestoneInputFromLists(active, archived, raw);
+				return milestoneKey(resolved) === targetKey;
+			});
 		}
 		return result;
 	}
@@ -288,8 +313,14 @@ export class Core {
 		const trimmedQuery = query?.trim();
 		const includeCrossBranch = options.includeCrossBranch ?? true;
 
+		let milestoneResolution: { active: Milestone[]; archived: Milestone[] } | undefined;
+		if (filters?.milestoneId !== undefined) {
+			const [active, archived] = await Promise.all([this.fs.listMilestones(), this.fs.listArchivedMilestones()]);
+			milestoneResolution = { active, archived };
+		}
+
 		const applyFiltersAndLimit = (collection: Task[]): Task[] => {
-			let filtered = this.applyTaskFilters(collection, filters);
+			let filtered = this.applyTaskFilters(collection, filters, milestoneResolution);
 			if (!includeCrossBranch) {
 				filtered = this.filterLocalEditableTasks(filtered);
 			}
@@ -1126,7 +1157,133 @@ export class Core {
 		return filepath;
 	}
 
-	async updateTask(task: Task, autoCommit?: boolean): Promise<void> {
+	private buildTaskAuditActor(auditActor?: TaskAuditActor): TaskAuditActor {
+		if (auditActor) {
+			return auditActor;
+		}
+		const userId = (process.env.USERNAME || process.env.USER || "").trim();
+		return {
+			kind: "user",
+			source: "cli",
+			...(userId ? { id: userId, displayName: userId } : {}),
+		};
+	}
+
+	private buildTaskAuditEvent(
+		taskId: string,
+		eventType: TaskAuditEvent["eventType"],
+		summary: string,
+		data: Record<string, unknown>,
+		auditActor?: TaskAuditActor,
+		occurredAt = new Date(),
+	): TaskAuditEvent {
+		return {
+			id: randomUUID(),
+			taskId,
+			eventType,
+			occurredAt: occurredAt.toISOString(),
+			actor: this.buildTaskAuditActor(auditActor),
+			summary,
+			data,
+		};
+	}
+
+	private async appendTaskMutationAuditEvents(
+		originalTask: Task,
+		task: Task,
+		auditActor?: TaskAuditActor,
+	): Promise<void> {
+		const occurredAt = new Date();
+		const events: TaskAuditEvent[] = [];
+
+		if ((originalTask.status ?? "") !== (task.status ?? "")) {
+			events.push(
+				this.buildTaskAuditEvent(
+					task.id,
+					"task_status_changed",
+					`Task status changed from ${originalTask.status || "(none)"} to ${task.status || "(none)"}`,
+					{
+						previousStatus: originalTask.status || "",
+						nextStatus: task.status || "",
+						previousAssignees: originalTask.assignee ?? [],
+						nextAssignees: task.assignee ?? [],
+					},
+					auditActor,
+					occurredAt,
+				),
+			);
+		}
+
+		if (!stringArraysEqual(originalTask.assignee ?? [], task.assignee ?? [])) {
+			events.push(
+				this.buildTaskAuditEvent(
+					task.id,
+					"task_assignee_changed",
+					`Task assignee changed from ${(originalTask.assignee ?? []).join(", ") || "unassigned"} to ${(task.assignee ?? []).join(", ") || "unassigned"}`,
+					{
+						previousAssignees: originalTask.assignee ?? [],
+						nextAssignees: task.assignee ?? [],
+					},
+					auditActor,
+					occurredAt,
+				),
+			);
+		}
+
+		if (!stringArraysEqual(originalTask.labels ?? [], task.labels ?? [])) {
+			events.push(
+				this.buildTaskAuditEvent(
+					task.id,
+					"task_labels_changed",
+					"Task labels changed",
+					{
+						previousLabels: originalTask.labels ?? [],
+						nextLabels: task.labels ?? [],
+					},
+					auditActor,
+					occurredAt,
+				),
+			);
+		}
+
+		if ((originalTask.priority ?? "") !== (task.priority ?? "")) {
+			events.push(
+				this.buildTaskAuditEvent(
+					task.id,
+					"task_priority_changed",
+					`Task priority changed from ${originalTask.priority || "none"} to ${task.priority || "none"}`,
+					{
+						previousPriority: originalTask.priority ?? "",
+						nextPriority: task.priority ?? "",
+					},
+					auditActor,
+					occurredAt,
+				),
+			);
+		}
+
+		if ((originalTask.milestone ?? "") !== (task.milestone ?? "")) {
+			events.push(
+				this.buildTaskAuditEvent(
+					task.id,
+					"task_milestone_changed",
+					`Task milestone changed from ${originalTask.milestone || "none"} to ${task.milestone || "none"}`,
+					{
+						previousMilestone: originalTask.milestone ?? "",
+						nextMilestone: task.milestone ?? "",
+					},
+					auditActor,
+					occurredAt,
+				),
+			);
+		}
+
+		if (events.length > 0) {
+			await this.fs.appendTaskAuditEvents(events);
+		}
+	}
+
+	async updateTask(task: Task, autoCommit?: boolean, auditActor?: TaskAuditActor): Promise<void> {
 		normalizeAssignee(task);
 
 		// Load original task to detect status changes for callbacks
@@ -1139,6 +1296,13 @@ export class Core {
 		task.updatedDate = new Date().toISOString().slice(0, 16).replace("T", " ");
 
 		await this.fs.saveTask(task);
+		if (originalTask) {
+			try {
+				await this.appendTaskMutationAuditEvents(originalTask, task, auditActor);
+			} catch (error) {
+				console.error(`Failed to append task audit events for ${task.id}:`, error);
+			}
+		}
 		// Keep any in-process ContentStore in sync for immediate UI/search freshness.
 		if (this.contentStore) {
 			const savedTask = await this.fs.loadTask(task.id);
@@ -1157,6 +1321,9 @@ export class Core {
 		// Fire status change callback if status changed
 		if (statusChanged) {
 			await this.executeStatusChangeCallback(task, oldStatus, newStatus);
+		}
+		if (originalTask) {
+			await handleAutomatedQaTaskChange(this, originalTask, task);
 		}
 	}
 
@@ -1631,7 +1798,12 @@ export class Core {
 		return { task, mutated };
 	}
 
-	async updateTaskFromInput(taskId: string, input: TaskUpdateInput, autoCommit?: boolean): Promise<Task> {
+	async updateTaskFromInput(
+		taskId: string,
+		input: TaskUpdateInput,
+		autoCommit?: boolean,
+		auditActor?: TaskAuditActor,
+	): Promise<Task> {
 		const task = await this.fs.loadTask(taskId);
 		if (!task) {
 			throw new Error(`Task not found: ${taskId}`);
@@ -1650,7 +1822,7 @@ export class Core {
 			return task;
 		}
 
-		await this.updateTask(task, autoCommit);
+		await this.updateTask(task, autoCommit, auditActor);
 		const refreshed = await this.fs.loadTask(taskId);
 		return refreshed ?? task;
 	}

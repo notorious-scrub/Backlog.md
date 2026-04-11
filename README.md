@@ -102,6 +102,17 @@ Use Backlog.md as a standalone task manager from the terminal or browser.
 backlog task create "Render markdown as kanban"
 backlog task edit BACK-1 -d "Detailed context" --ac "Clear acceptance criteria"
 
+# Milestones (Markdown files under backlog/milestones/)
+backlog milestone add
+backlog milestone add "Release 1.0" -d "Ship criteria"
+backlog milestone edit
+backlog milestone edit "Release 1.0" -d "Updated ship criteria"
+backlog task create "Board polish" --milestone "Release 1.0"
+backlog task milestone BACK-10 BACK-11 --milestone "Release 1.0"
+backlog task list -m "Release 1.0"
+backlog search "ship" --milestone "Release 1.0"
+backlog milestone list --discovery --plain
+
 # Track work
 backlog task list -s "To Do"
 backlog search "kanban"
@@ -113,7 +124,7 @@ backlog browser
 
 You can switch between AI-assisted and manual workflows at any time — both operate on the same Markdown task files. It is recommended to modify tasks via Backlog.md commands (CLI/MCP/Web) rather than editing task files manually, so field types and metadata stay consistent.
 
-**Learn more:** [CLI reference](CLI-INSTRUCTIONS.md) | [Advanced configuration](ADVANCED-CONFIG.md)
+**Learn more:** [CLI helper](backlog-cli.md) | [CLI reference](CLI-INSTRUCTIONS.md) | [Advanced configuration](ADVANCED-CONFIG.md)
 
 ---
 
@@ -224,7 +235,10 @@ Use `/mcp` command in your AI tool (Claude Code, Codex, Kiro) to verify if the c
 
 Full command reference — task management, search, board, docs, decisions, and more: **[CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md)**
 
-Quick examples: `backlog task create`, `backlog task list`, `backlog task edit`, `backlog search`, `backlog board`, `backlog browser`.
+Need the fast path for agent sessions and everyday task updates? Start with
+**[backlog-cli.md](backlog-cli.md)**.
+
+Quick examples: `backlog task create`, `backlog task list`, `backlog task edit`, `backlog milestone add`, `backlog milestone list`, `backlog search`, `backlog board`, `backlog browser`.
 
 Full help: `backlog --help`
 
@@ -247,6 +261,7 @@ Run `backlog config` with no arguments to launch the full interactive wizard. Th
 - ID formatting: enable or size `zeroPaddedIds`.
 - Editor integration: pick a `defaultEditor` with availability checks.
 - Definition of Done defaults: interactively add/remove/reorder/clear project-level `definition_of_done` checklist items.
+- Automated QA handoff: enable built-in Codex QA orchestration, choose the trigger status, and pause queue draining when you want to save agent cost.
 - Web UI defaults: choose `defaultPort` and whether `autoOpenBrowser` should run.
 
 Skipping the wizard (answering "No" during init) applies the safe defaults that ship with Backlog.md:
@@ -270,6 +285,27 @@ definition_of_done:
 ```
 
 These items are added to every new task by default. You can add more on create with `--dod`, or disable defaults per task with `--no-dod-defaults`.
+
+### Automated QA handoff
+
+Backlog.md can automatically queue and launch Codex QA reviews when tasks move into a configured status such as `QA`.
+
+- Configure it in the browser under `Settings -> Automated QA`.
+- Turn on `Enable automated QA` to allow automatic Codex review handoff.
+- Use `Pause automatic spawning` when you want tasks to accumulate in the queue instead of launching immediately.
+- When you resume, Backlog.md drains the queued QA tasks automatically and also sweeps older tasks already sitting in the trigger status.
+- The default subagent hint is `qa_engineer`, but projects can override that if they use a different QA agent name.
+- Active automated review claims the task with the configured reviewer assignee, which defaults to `QA`.
+- You can set the automated QA timeout in Settings when certain reviews need more than the default 180 seconds.
+- Reviewer runs use shell-command backlog reads and writes instead of direct file-edit tools, which avoids nested approval deadlocks during automated QA.
+- Reviewer runs launch Codex with `danger-full-access` sandboxing so they can reach the Backlog.md CLI path even when the reviewed project lives outside the Backlog.md source tree.
+- Settings now show recent durable QA run records so you can verify when a task was queued, started, completed, failed, skipped, or abandoned.
+- Reviewer runs also terminate after the automated QA timeout budget instead of leaving tasks stranded in `QA` indefinitely.
+- Recent QA run records now retain bounded reviewer stdout/stderr excerpts and the last captured output event so timeout failures are diagnosable without keeping unbounded transcripts.
+
+The matching project config lives in `backlog/config.yml` under `automated_qa`, queue/runtime state is stored in `backlog/automated-qa-state.json`, and durable run history is stored in `backlog/automated-qa-runs.json`. Active runs record queue/start/completion timestamps plus phase and heartbeat metadata so the Settings UI can distinguish healthy long-running reviews from stale candidates.
+
+Backlog.md also supports the generalized `agent_automations` registry for multiple named automations. The first entry is synchronized with the legacy `automated_qa` block, while each run record now carries automation ID/name, trigger type, trigger signature, and queue-entry metadata so the Settings dashboard can attribute queued and active work to the right automation. See `backlog/docs/agent-automation-model.md/doc-3 - Generalized-Agent-Automation-Model.md` for the trigger model, queue semantics, and migration guidance.
 
 For the full configuration reference (all options, commands, and detailed notes), see **[ADVANCED-CONFIG.md](ADVANCED-CONFIG.md)**.
 

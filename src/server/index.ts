@@ -2,13 +2,32 @@ import { mkdir, readdir } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import type { Server, ServerWebSocket } from "bun";
 import { $ } from "bun";
+import {
+	getAutomatedQaStaleThresholdMs,
+	listRecentAutomatedQaRuns,
+	loadAutomatedQaState,
+	normalizeAgentAutomationConfigs,
+	normalizeAutomatedQaConfig,
+	spawnAutomatedQaWorker,
+	toAgentAutomationConfig,
+} from "../core/automated-qa.ts";
 import { Core } from "../core/backlog.ts";
 import type { ContentStore } from "../core/content-store.ts";
 import { initializeProject } from "../core/init.ts";
 import type { SearchService } from "../core/search-service.ts";
 import { getTaskStatistics } from "../core/statistics.ts";
-import type { SearchPriorityFilter, SearchResultType, Task, TaskUpdateInput } from "../types/index.ts";
+import type {
+	BacklogConfig,
+	SearchPriorityFilter,
+	SearchResultType,
+	Task,
+	TaskAuditActor,
+	TaskAuditEventFilter,
+	TaskAuditEventType,
+	TaskUpdateInput,
+} from "../types/index.ts";
 import { watchConfig } from "../utils/config-watcher.ts";
+import { resolveMilestoneInputFromLists } from "../utils/milestone-input.ts";
 import { getVersion } from "../utils/version.ts";
 
 // Regex pattern to match any prefix (letters followed by dash)
@@ -94,120 +113,63 @@ export class BacklogServer {
 			return normalized;
 		}
 
-		const key = normalized.toLowerCase();
-		const aliasKeys = new Set<string>([key]);
-		const looksLikeMilestoneId = /^\d+$/.test(normalized) || /^m-\d+$/i.test(normalized);
-		const canonicalInputId =
-			/^\d+$/.test(normalized) || /^m-\d+$/i.test(normalized)
-				? `m-${String(Number.parseInt(normalized.replace(/^m-/i, ""), 10))}`
-				: null;
-		if (/^\d+$/.test(normalized)) {
-			const numeric = String(Number.parseInt(normalized, 10));
-			aliasKeys.add(numeric);
-			aliasKeys.add(`m-${numeric}`);
-		} else {
-			const match = normalized.match(/^m-(\d+)$/i);
-			if (match?.[1]) {
-				const numeric = String(Number.parseInt(match[1], 10));
-				aliasKeys.add(numeric);
-				aliasKeys.add(`m-${numeric}`);
-			}
-		}
 		const [activeMilestones, archivedMilestones] = await Promise.all([
 			this.core.filesystem.listMilestones(),
 			this.core.filesystem.listArchivedMilestones(),
 		]);
-		const idMatchesAlias = (milestoneId: string): boolean => {
-			const idKey = milestoneId.trim().toLowerCase();
-			if (aliasKeys.has(idKey)) {
-				return true;
-			}
-			if (/^\d+$/.test(milestoneId.trim())) {
-				const numeric = String(Number.parseInt(milestoneId.trim(), 10));
-				return aliasKeys.has(numeric) || aliasKeys.has(`m-${numeric}`);
-			}
-			const idMatch = milestoneId.trim().match(/^m-(\d+)$/i);
-			if (!idMatch?.[1]) {
-				return false;
-			}
-			const numeric = String(Number.parseInt(idMatch[1], 10));
-			return aliasKeys.has(numeric) || aliasKeys.has(`m-${numeric}`);
+		return resolveMilestoneInputFromLists(activeMilestones, archivedMilestones, milestone);
+	}
+
+	private buildWebAuditActor(): TaskAuditActor {
+		const userId = (process.env.USERNAME || process.env.USER || "").trim();
+		return {
+			kind: "user",
+			source: "web",
+			...(userId ? { id: userId, displayName: userId } : {}),
 		};
-		const findIdMatch = (
-			milestones: Array<{ id: string; title: string }>,
-		): { id: string; title: string } | undefined => {
-			const rawExactMatch = milestones.find((item) => item.id.trim().toLowerCase() === key);
-			if (rawExactMatch) {
-				return rawExactMatch;
-			}
-			if (canonicalInputId) {
-				const canonicalRawMatch = milestones.find((item) => item.id.trim().toLowerCase() === canonicalInputId);
-				if (canonicalRawMatch) {
-					return canonicalRawMatch;
-				}
-			}
-			return milestones.find((item) => idMatchesAlias(item.id));
+	}
+
+	private parseAuditEventType(value: string | null): TaskAuditEventType | undefined {
+		switch (value) {
+			case "task_status_changed":
+			case "task_assignee_changed":
+			case "task_labels_changed":
+			case "task_priority_changed":
+			case "task_milestone_changed":
+			case "automation_run_queued":
+			case "automation_run_dequeued":
+			case "automation_task_claimed":
+			case "automation_reviewer_launching":
+			case "automation_reviewer_started":
+			case "automation_reviewer_output":
+			case "automation_run_succeeded":
+			case "automation_run_failed":
+			case "automation_run_skipped":
+			case "automation_run_abandoned":
+			case "automation_queue_paused":
+				return value;
+			default:
+				return undefined;
+		}
+	}
+
+	private buildAuditEventFilter(req: Request, taskId?: string): TaskAuditEventFilter {
+		const url = new URL(req.url);
+		const limitRaw = url.searchParams.get("limit");
+		const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : Number.NaN;
+		const limit = Number.isFinite(parsedLimit) ? parsedLimit : undefined;
+		const cursor = url.searchParams.get("cursor")?.trim() || undefined;
+		const automationId = url.searchParams.get("automationId")?.trim() || undefined;
+		const eventType = this.parseAuditEventType(url.searchParams.get("eventType"));
+		const queryTaskId = url.searchParams.get("taskId")?.trim() || undefined;
+		const normalizedTaskId = taskId ?? (queryTaskId ? ensurePrefix(queryTaskId) : undefined);
+		return {
+			...(normalizedTaskId ? { taskId: normalizedTaskId } : {}),
+			...(automationId ? { automationId } : {}),
+			...(eventType ? { eventType } : {}),
+			...(limit !== undefined ? { limit } : {}),
+			...(cursor ? { cursor } : {}),
 		};
-		const findUniqueTitleMatch = (
-			milestones: Array<{ id: string; title: string }>,
-		): { id: string; title: string } | null => {
-			const titleMatches = milestones.filter((item) => item.title.trim().toLowerCase() === key);
-			if (titleMatches.length === 1) {
-				return titleMatches[0] ?? null;
-			}
-			return null;
-		};
-
-		const matchByAlias = (milestones: Array<{ id: string; title: string }>): string | null => {
-			const idMatch = findIdMatch(milestones);
-			const titleMatch = findUniqueTitleMatch(milestones);
-			if (looksLikeMilestoneId) {
-				return idMatch?.id ?? null;
-			}
-			if (titleMatch) {
-				return titleMatch.id;
-			}
-			if (idMatch) {
-				return idMatch.id;
-			}
-			return null;
-		};
-
-		const activeTitleMatches = activeMilestones.filter((item) => item.title.trim().toLowerCase() === key);
-		const hasAmbiguousActiveTitle = activeTitleMatches.length > 1;
-		if (looksLikeMilestoneId) {
-			const activeIdMatch = findIdMatch(activeMilestones);
-			if (activeIdMatch) {
-				return activeIdMatch.id;
-			}
-			const archivedIdMatch = findIdMatch(archivedMilestones);
-			if (archivedIdMatch) {
-				return archivedIdMatch.id;
-			}
-			if (activeTitleMatches.length === 1) {
-				return activeTitleMatches[0]?.id ?? normalized;
-			}
-			if (hasAmbiguousActiveTitle) {
-				return normalized;
-			}
-			const archivedTitleMatch = findUniqueTitleMatch(archivedMilestones);
-			return archivedTitleMatch?.id ?? normalized;
-		}
-
-		const activeMatch = matchByAlias(activeMilestones);
-		if (activeMatch) {
-			return activeMatch;
-		}
-		if (hasAmbiguousActiveTitle) {
-			return normalized;
-		}
-
-		const archivedMatch = matchByAlias(archivedMilestones);
-		if (archivedMatch) {
-			return archivedMatch;
-		}
-
-		return normalized;
 	}
 
 	private async ensureServicesReady(): Promise<void> {
@@ -297,6 +259,10 @@ export class BacklogServer {
 
 		try {
 			await this.ensureServicesReady();
+			const agentAutomations = normalizeAgentAutomationConfigs(config?.agentAutomations, config?.automatedQa);
+			if (agentAutomations.some((automation) => automation.enabled && !automation.paused)) {
+				await spawnAutomatedQaWorker(this.core.filesystem.rootDir);
+			}
 			const serveOptions = {
 				port: finalPort,
 				development: process.env.NODE_ENV === "development",
@@ -326,6 +292,13 @@ export class BacklogServer {
 						PUT: async (req: Request & { params: { id: string } }) => await this.handleUpdateTask(req, req.params.id),
 						DELETE: async (req: Request & { params: { id: string } }) => await this.handleDeleteTask(req.params.id),
 					},
+					"/api/tasks/:id/audit-log": {
+						GET: async (req: Request & { params: { id: string } }) =>
+							await this.handleGetTaskAuditLog(req, req.params.id),
+					},
+					"/api/agent-automations/audit-log": {
+						GET: async (req: Request) => await this.handleGetAgentAutomationAuditLog(req),
+					},
 					"/api/tasks/:id/complete": {
 						POST: async (req: Request & { params: { id: string } }) => await this.handleCompleteTask(req.params.id),
 					},
@@ -335,6 +308,9 @@ export class BacklogServer {
 					"/api/config": {
 						GET: async () => await this.handleGetConfig(),
 						PUT: async (req: Request) => await this.handleUpdateConfig(req),
+					},
+					"/api/automated-qa": {
+						GET: async () => await this.handleGetAutomatedQa(),
 					},
 					"/api/docs": {
 						GET: async () => await this.handleListDocs(),
@@ -885,6 +861,28 @@ export class BacklogServer {
 		return Response.json(task);
 	}
 
+	private async handleGetTaskAuditLog(req: Request, taskId: string): Promise<Response> {
+		try {
+			const page = await this.core.filesystem.listTaskAuditEvents(
+				this.buildAuditEventFilter(req, ensurePrefix(taskId)),
+			);
+			return Response.json(page);
+		} catch (error) {
+			console.error("Error loading task audit log:", error);
+			return Response.json({ error: "Failed to load task audit log" }, { status: 500 });
+		}
+	}
+
+	private async handleGetAgentAutomationAuditLog(req: Request): Promise<Response> {
+		try {
+			const page = await this.core.filesystem.listTaskAuditEvents(this.buildAuditEventFilter(req));
+			return Response.json(page);
+		} catch (error) {
+			console.error("Error loading automation audit log:", error);
+			return Response.json({ error: "Failed to load automation audit log" }, { status: 500 });
+		}
+	}
+
 	private async handleUpdateTask(req: Request, taskId: string): Promise<Response> {
 		const updates = await req.json();
 		const existingTask = await this.core.filesystem.loadTask(taskId);
@@ -980,7 +978,12 @@ export class BacklogServer {
 		}
 
 		try {
-			const updatedTask = await this.core.updateTaskFromInput(taskId, updateInput);
+			const updatedTask = await this.core.updateTaskFromInput(
+				taskId,
+				updateInput,
+				undefined,
+				this.buildWebAuditActor(),
+			);
 			return Response.json(updatedTask);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Failed to update task";
@@ -1382,9 +1385,33 @@ export class BacklogServer {
 		}
 	}
 
+	private async handleGetAutomatedQa(): Promise<Response> {
+		try {
+			const config = await this.core.filesystem.loadConfig();
+			if (!config) {
+				return Response.json({ error: "Configuration not found" }, { status: 404 });
+			}
+			const state = await loadAutomatedQaState(this.core.filesystem.rootDir);
+			const recentRuns = await listRecentAutomatedQaRuns(this.core.filesystem.rootDir);
+			return Response.json({
+				config: normalizeAutomatedQaConfig(config.automatedQa),
+				automations: normalizeAgentAutomationConfigs(config.agentAutomations, config.automatedQa).map((automation) =>
+					toAgentAutomationConfig(automation),
+				),
+				state,
+				staleThresholdMs: getAutomatedQaStaleThresholdMs(),
+				recentRuns,
+			});
+		} catch (error) {
+			console.error("Error loading automated QA state:", error);
+			return Response.json({ error: "Failed to load automated QA state" }, { status: 500 });
+		}
+	}
+
 	private async handleUpdateConfig(req: Request): Promise<Response> {
 		try {
-			const updatedConfig = await req.json();
+			const updatedConfig = (await req.json()) as BacklogConfig;
+			const existingConfig = await this.core.filesystem.loadConfig();
 
 			// Validate configuration
 			if (!updatedConfig.projectName?.trim()) {
@@ -1394,6 +1421,71 @@ export class BacklogServer {
 			if (updatedConfig.defaultPort && (updatedConfig.defaultPort < 1 || updatedConfig.defaultPort > 65535)) {
 				return Response.json({ error: "Port must be between 1 and 65535" }, { status: 400 });
 			}
+
+			const requestedAgentAutomations =
+				Array.isArray(updatedConfig.agentAutomations) && updatedConfig.agentAutomations.length > 0
+					? updatedConfig.agentAutomations.map((automation, index) =>
+							index === 0 && updatedConfig.automatedQa
+								? {
+										...automation,
+										id: automation.id ?? "automated-qa",
+										name: automation.name ?? "Automated QA",
+										enabled: updatedConfig.automatedQa.enabled,
+										paused: updatedConfig.automatedQa.paused,
+										trigger: {
+											...(automation.trigger ?? {}),
+											type: "status_transition" as const,
+											toStatus: updatedConfig.automatedQa.triggerStatus,
+										},
+										codexCommand: updatedConfig.automatedQa.codexCommand,
+										agentName: updatedConfig.automatedQa.agentName,
+										reviewerAssignee: updatedConfig.automatedQa.reviewerAssignee,
+										timeoutSeconds: updatedConfig.automatedQa.timeoutSeconds,
+									}
+								: automation,
+						)
+					: updatedConfig.agentAutomations;
+			const agentAutomations = normalizeAgentAutomationConfigs(requestedAgentAutomations, updatedConfig.automatedQa);
+			for (const automation of agentAutomations) {
+				if (
+					automation.enabled &&
+					automation.triggerStatus &&
+					!updatedConfig.statuses.some(
+						(status) => status.trim().toLowerCase() === automation.triggerStatus.toLowerCase(),
+					)
+				) {
+					return Response.json(
+						{ error: `Automation "${automation.name}" trigger status must match one of the configured statuses` },
+						{ status: 400 },
+					);
+				}
+				if (automation.timeoutSeconds < 30 || automation.timeoutSeconds > 7200) {
+					return Response.json(
+						{ error: `Automation "${automation.name}" timeout must be between 30 and 7200 seconds` },
+						{ status: 400 },
+					);
+				}
+				if (automation.maxConcurrentRuns < 1 || automation.maxConcurrentRuns > 25) {
+					return Response.json(
+						{ error: `Automation "${automation.name}" max concurrent runs must be between 1 and 25` },
+						{ status: 400 },
+					);
+				}
+			}
+			const primaryAutomation =
+				agentAutomations.find((automation) => automation.id === "automated-qa") ?? agentAutomations[0];
+			updatedConfig.agentAutomations = agentAutomations.map((automation) => toAgentAutomationConfig(automation));
+			updatedConfig.automatedQa = primaryAutomation
+				? {
+						enabled: primaryAutomation.enabled,
+						paused: primaryAutomation.paused,
+						triggerStatus: primaryAutomation.triggerStatus,
+						codexCommand: primaryAutomation.codexCommand,
+						agentName: primaryAutomation.agentName,
+						reviewerAssignee: primaryAutomation.reviewerAssignee,
+						timeoutSeconds: primaryAutomation.timeoutSeconds,
+					}
+				: normalizeAutomatedQaConfig(updatedConfig.automatedQa);
 
 			// Save configuration
 			await this.core.filesystem.saveConfig(updatedConfig);
@@ -1405,6 +1497,28 @@ export class BacklogServer {
 
 			// Notify connected clients so that they refresh configuration-dependent data (e.g., statuses)
 			this.broadcastTasksUpdated();
+
+			const previousAutomations = normalizeAgentAutomationConfigs(
+				existingConfig?.agentAutomations,
+				existingConfig?.automatedQa,
+			);
+			const shouldStartWorker = agentAutomations.some((automation) => {
+				if (!automation.enabled || automation.paused) {
+					return false;
+				}
+				const previousAutomation = previousAutomations.find((entry) => entry.id === automation.id);
+				return (
+					!previousAutomation ||
+					!previousAutomation.enabled ||
+					previousAutomation.paused ||
+					previousAutomation.triggerType !== automation.triggerType ||
+					previousAutomation.triggerStatus !== automation.triggerStatus ||
+					previousAutomation.maxConcurrentRuns !== automation.maxConcurrentRuns
+				);
+			});
+			if (shouldStartWorker) {
+				await spawnAutomatedQaWorker(this.core.filesystem.rootDir);
+			}
 
 			return Response.json(updatedConfig);
 		} catch (error) {

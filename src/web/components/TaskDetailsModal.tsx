@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AcceptanceCriterion, Milestone, Task } from "../../types";
+import type { AcceptanceCriterion, Milestone, Task, TaskAuditEvent } from "../../types";
 import Modal from "./Modal";
 import { apiClient } from "../lib/api";
 import { useTheme } from "../contexts/ThemeContext";
@@ -17,6 +17,13 @@ import {
 	getReopenTargetStatuses,
 	prependReopenedDetails,
 } from "../utils/reopen";
+import {
+	type AuditEventFilter,
+	formatAuditActor,
+	formatAuditEventType,
+	formatAuditValue,
+	matchesAuditEventFilter,
+} from "../utils/audit-log-display";
 
 interface Props {
   task?: Task; // Optional for create mode
@@ -52,12 +59,21 @@ type InlineMetaUpdatePayload = Omit<Partial<Task>, "milestone"> & {
 
 type TextSectionKey = "description" | "plan" | "notes" | "finalSummary";
 
+
 const DEFAULT_COLLAPSED_TEXT_SECTIONS: Record<TextSectionKey, boolean> = {
   description: false,
   plan: true,
   notes: true,
   finalSummary: true,
 };
+
+const buildInitialCollapsedTextSections = (
+  task: Task | undefined,
+  isCreateMode: boolean,
+): Record<TextSectionKey, boolean> => ({
+  ...DEFAULT_COLLAPSED_TEXT_SECTIONS,
+  finalSummary: !(isCreateMode || (task?.finalSummary ?? "").trim().length > 0),
+});
 
 const SectionHeader: React.FC<{ title: string; right?: React.ReactNode }> = ({ title, right }) => (
   <div className="flex items-center justify-between mb-3">
@@ -67,6 +83,12 @@ const SectionHeader: React.FC<{ title: string; right?: React.ReactNode }> = ({ t
     {right ? <div className="ml-2 text-xs text-gray-500 dark:text-gray-400">{right}</div> : null}
   </div>
 );
+
+const TASK_AUDIT_FILTERS: Array<{ value: AuditEventFilter; label: string }> = [
+	{ value: "all", label: "All" },
+	{ value: "task", label: "Task changes" },
+	{ value: "automation", label: "Automation" },
+];
 
 export const TaskDetailsModal: React.FC<Props> = ({
   task,
@@ -260,12 +282,36 @@ export const TaskDetailsModal: React.FC<Props> = ({
   const previousIsOpenRef = useRef(false);
   const previousTaskIdRef = useRef<string | null>(null);
   const [collapsedTextSections, setCollapsedTextSections] = useState<Record<TextSectionKey, boolean>>(
-    DEFAULT_COLLAPSED_TEXT_SECTIONS,
+    () => buildInitialCollapsedTextSections(task, isCreateMode),
   );
   const [isScreenshotLibraryCollapsed, setIsScreenshotLibraryCollapsed] = useState(true);
   const [milestone, setMilestone] = useState<string>(task?.milestone || "");
   const [availableTasks, setAvailableTasks] = useState<Task[]>([]);
+  const [taskAuditEvents, setTaskAuditEvents] = useState<TaskAuditEvent[]>([]);
+  const [taskAuditFilter, setTaskAuditFilter] = useState<AuditEventFilter>("all");
+  const [taskAuditLoading, setTaskAuditLoading] = useState(false);
+  const [taskAuditError, setTaskAuditError] = useState<string | null>(null);
   const milestoneSelectionValue = resolveMilestoneToId(milestone);
+
+  const loadTaskAuditEvents = useCallback(async (taskId: string | undefined) => {
+    if (!taskId) {
+      setTaskAuditEvents([]);
+      setTaskAuditLoading(false);
+      setTaskAuditError(null);
+      return;
+    }
+    setTaskAuditLoading(true);
+    try {
+      const page = await apiClient.fetchTaskAuditLog(taskId, { limit: 50 });
+      setTaskAuditEvents(page.events);
+      setTaskAuditError(null);
+    } catch (err) {
+      setTaskAuditEvents([]);
+      setTaskAuditError(err instanceof Error ? err.message : "Failed to load audit log");
+    } finally {
+      setTaskAuditLoading(false);
+    }
+  }, []);
 
   const focusDescriptionEditor = useCallback(() => {
     setCollapsedTextSections((current) => ({ ...current, description: false }));
@@ -321,6 +367,10 @@ export const TaskDetailsModal: React.FC<Props> = ({
     }
     return taskNavigationIds.findIndex((taskId) => taskId === task.id);
   }, [task?.id, taskNavigationIds]);
+  const visibleTaskAuditEvents = useMemo(
+    () => taskAuditEvents.filter((event) => matchesAuditEventFilter(event.eventType, taskAuditFilter)),
+    [taskAuditEvents, taskAuditFilter],
+  );
 
   const previousTaskId = taskNavigationIndex > 0 ? (taskNavigationIds?.[taskNavigationIndex - 1] ?? null) : null;
   const nextTaskId =
@@ -401,11 +451,13 @@ export const TaskDetailsModal: React.FC<Props> = ({
     setIsUploadingScreenshot(false);
     setIsReopenModalOpen(false);
     setIsReopening(false);
-    setCollapsedTextSections(DEFAULT_COLLAPSED_TEXT_SECTIONS);
+    setCollapsedTextSections(buildInitialCollapsedTextSections(task, isCreateMode));
     setIsScreenshotLibraryCollapsed(true);
     setMilestone(task?.milestone || "");
+    setTaskAuditFilter("all");
     setMode(isCreateMode ? "create" : "preview");
     setError(null);
+    void loadTaskAuditEvents(task?.id);
     // Preload tasks for dependency picker
     apiClient.fetchTasks().then(setAvailableTasks).catch(() => setAvailableTasks([]));
     apiClient.fetchScreenshots()
@@ -429,7 +481,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
         input.setSelectionRange(cursorPosition, cursorPosition);
       });
     }
-  }, [task, isOpen, isCreateMode, isDraftMode, availableStatuses, defaultDefinitionOfDone]);
+  }, [task, isOpen, isCreateMode, isDraftMode, availableStatuses, defaultDefinitionOfDone, loadTaskAuditEvents]);
 
   const handleCancelEdit = () => {
     if (isDirty) {
@@ -585,6 +637,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
         await apiClient.updateTask(task.id, taskData);
         setMode("preview");
         if (onSaved) await onSaved();
+        await loadTaskAuditEvents(task.id);
       }
     } catch (err) {
       // Extract and display the error message from API response
@@ -613,6 +666,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
     try {
       await apiClient.updateTask(task.id, { acceptanceCriteriaItems: next });
       if (onSaved) await onSaved();
+      await loadTaskAuditEvents(task.id);
     } catch (err) {
       // rollback
       setCriteria(criteria);
@@ -631,6 +685,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
         : { definitionOfDoneUncheck: [index] };
       await apiClient.updateTask(task.id, updates);
       if (onSaved) await onSaved();
+      await loadTaskAuditEvents(task.id);
     } catch (err) {
       setDefinitionOfDone(definitionOfDone);
       console.error("Failed to update Definition of Done item", err);
@@ -656,6 +711,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
       try {
         await apiClient.updateTask(task.id, updates);
         if (onSaved) await onSaved();
+        await loadTaskAuditEvents(task.id);
       } catch (err) {
         console.error("Failed to update task metadata", err);
         // No rollback for simplicity; caller can refresh
@@ -800,6 +856,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
       setStatus(nextStatus);
       setIsReopenModalOpen(false);
       if (onSaved) await onSaved();
+      await loadTaskAuditEvents(task.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1550,6 +1607,67 @@ export const TaskDetailsModal: React.FC<Props> = ({
               </div>
             )}
           </div>
+
+          {/* Audit Log */}
+          {task && (
+            <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+              <SectionHeader
+                title="Audit Log"
+                right={
+                  <div className="flex flex-wrap items-center gap-2">
+                    {TASK_AUDIT_FILTERS.map((filter) => (
+                      <button
+                        key={filter.value}
+                        type="button"
+                        onClick={() => setTaskAuditFilter(filter.value)}
+                        className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors duration-200 ${
+                          taskAuditFilter === filter.value
+                            ? "bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900"
+                            : "bg-gray-100 text-gray-600 hover:text-gray-800 dark:bg-gray-700 dark:text-gray-300 dark:hover:text-gray-100"
+                        }`}
+                      >
+                        {filter.label}
+                      </button>
+                    ))}
+                  </div>
+                }
+              />
+              {taskAuditError ? (
+                <div className="text-sm text-red-600 dark:text-red-400">{taskAuditError}</div>
+              ) : taskAuditLoading ? (
+                <div className="text-sm text-gray-500 dark:text-gray-400">Loading audit events...</div>
+              ) : visibleTaskAuditEvents.length > 0 ? (
+                <div className="space-y-3">
+                  {visibleTaskAuditEvents.map((event) => (
+                    <div
+                      key={event.id}
+                      className="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/30 px-3 py-3"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-medium text-gray-900 dark:text-gray-100">{event.summary}</span>
+                        <span className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-700 dark:bg-gray-700 dark:text-gray-200">
+                          {formatAuditEventType(event.eventType)}
+                        </span>
+                      </div>
+                      <div className="mt-2 grid gap-2 text-xs text-gray-500 dark:text-gray-400 md:grid-cols-2">
+                        <span>When: {formatStoredUtcDateForDisplay(event.occurredAt)}</span>
+                        <span>Actor: {formatAuditActor(event)}</span>
+                        {Object.entries(event.data).slice(0, 8).map(([key, value]) => (
+                          <span key={`${event.id}-${key}`}>
+                            {key}: {formatAuditValue(value)}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-sm text-gray-500 dark:text-gray-400">
+                  No {taskAuditFilter === "all" ? "" : `${taskAuditFilter} `}audit events recorded yet
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Final Summary */}
           {(mode !== "preview" || finalSummary.trim().length > 0) && (

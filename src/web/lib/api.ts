@@ -1,5 +1,6 @@
 import type { TaskStatistics } from "../../core/statistics.ts";
 import type {
+	AutomatedQaState,
 	BacklogConfig,
 	Decision,
 	Document,
@@ -8,6 +9,8 @@ import type {
 	SearchResult,
 	SearchResultType,
 	Task,
+	TaskAuditEventFilter,
+	TaskAuditEventPage,
 	TaskStatus,
 } from "../../types/index.ts";
 
@@ -209,6 +212,28 @@ export class ApiClient {
 		return this.fetchJson<Task>(`${API_BASE}/task/${id}`);
 	}
 
+	async fetchTaskAuditLog(
+		taskId: string,
+		options: Pick<TaskAuditEventFilter, "eventType" | "automationId" | "limit" | "cursor"> = {},
+	): Promise<TaskAuditEventPage> {
+		const params = new URLSearchParams();
+		if (options.eventType) {
+			params.set("eventType", options.eventType);
+		}
+		if (options.automationId) {
+			params.set("automationId", options.automationId);
+		}
+		if (options.limit !== undefined) {
+			params.set("limit", String(options.limit));
+		}
+		if (options.cursor) {
+			params.set("cursor", options.cursor);
+		}
+		return this.fetchJson<TaskAuditEventPage>(
+			`${API_BASE}/tasks/${encodeURIComponent(taskId)}/audit-log${params.toString() ? `?${params.toString()}` : ""}`,
+		);
+	}
+
 	async createTask(task: Omit<Task, "id" | "createdDate">): Promise<Task> {
 		return this.fetchJson<Task>(`${API_BASE}/tasks`, {
 			method: "POST",
@@ -336,6 +361,46 @@ export class ApiClient {
 			throw new Error("Failed to update config");
 		}
 		return response.json();
+	}
+
+	async fetchAutomatedQa(): Promise<{
+		config: NonNullable<BacklogConfig["automatedQa"]>;
+		automations: NonNullable<BacklogConfig["agentAutomations"]>;
+		state: AutomatedQaState;
+		staleThresholdMs: number;
+		recentRuns: import("../../types/index.ts").AutomatedQaRunRecord[];
+	}> {
+		return this.fetchJson<{
+			config: NonNullable<BacklogConfig["automatedQa"]>;
+			automations: NonNullable<BacklogConfig["agentAutomations"]>;
+			state: AutomatedQaState;
+			staleThresholdMs: number;
+			recentRuns: import("../../types/index.ts").AutomatedQaRunRecord[];
+		}>(`${API_BASE}/automated-qa`);
+	}
+
+	async fetchAgentAutomationAuditLog(
+		options: Pick<TaskAuditEventFilter, "taskId" | "eventType" | "automationId" | "limit" | "cursor"> = {},
+	): Promise<TaskAuditEventPage> {
+		const params = new URLSearchParams();
+		if (options.taskId) {
+			params.set("taskId", options.taskId);
+		}
+		if (options.eventType) {
+			params.set("eventType", options.eventType);
+		}
+		if (options.automationId) {
+			params.set("automationId", options.automationId);
+		}
+		if (options.limit !== undefined) {
+			params.set("limit", String(options.limit));
+		}
+		if (options.cursor) {
+			params.set("cursor", options.cursor);
+		}
+		return this.fetchJson<TaskAuditEventPage>(
+			`${API_BASE}/agent-automations/audit-log${params.toString() ? `?${params.toString()}` : ""}`,
+		);
 	}
 
 	async fetchDocs(): Promise<Document[]> {

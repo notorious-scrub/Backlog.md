@@ -113,4 +113,31 @@ describe("CLI search command", () => {
 		const taskMatches = stdout.match(/TASK-\d+ -/g) || [];
 		expect(taskMatches.length).toBeLessThanOrEqual(1);
 	});
+
+	it("filters task matches by milestone without hiding matching documents or decisions", async () => {
+		const core = new Core(TEST_DIR);
+		const milestone = await core.createMilestone("Release Search", "Search release");
+		await core.editTask("task-1", { milestone: milestone.id }, false);
+
+		const result = await $`bun ${cliPath} search central --milestone "Release Search" --plain`.cwd(TEST_DIR).quiet();
+		expect(result.exitCode).toBe(0);
+		const stdout = result.stdout.toString();
+		expect(stdout).toContain("TASK-1 - Central search integration");
+		expect(stdout).toContain("Documents:");
+		expect(stdout).toContain("doc-1 - Search Architecture Notes");
+		expect(stdout).toContain("Decisions:");
+		expect(stdout).toContain("decision-1 - Adopt centralized search");
+	});
+
+	it("supports searching for tasks without milestones", async () => {
+		const core = new Core(TEST_DIR);
+		const milestone = await core.createMilestone("Release Search", "Search release");
+		await core.editTask("task-1", { milestone: milestone.id }, false);
+
+		const result = await $`bun ${cliPath} search --type task --milestone none --plain`.cwd(TEST_DIR).quiet();
+		expect(result.exitCode).toBe(0);
+		const stdout = result.stdout.toString();
+		expect(stdout).toContain("TASK-2 - High priority follow-up");
+		expect(stdout).not.toContain("TASK-1 - Central search integration");
+	});
 });

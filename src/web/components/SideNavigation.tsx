@@ -136,6 +136,11 @@ const Icons = {
 			<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
 		</svg>
 	),
+	Automation: () => (
+		<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 3.75h4.5v3h-4.5zm-4.5 7.5h13.5v4.5H5.25zm2.25 4.5v4.5h3v-4.5zm6.75 0v4.5h3v-4.5z" />
+		</svg>
+	),
 	Milestone: () => (
 		<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<circle cx="12" cy="12" r="9" strokeWidth={2} />
@@ -574,6 +579,20 @@ const SideNavigation = memo(function SideNavigation({
 							<Icons.Statistics />
 							<span className="ml-3 text-sm font-medium">Statistics</span>
 						</NavLink>
+
+						<NavLink
+							to="/agent-orchestration"
+							className={({ isActive }) =>
+								`flex items-center px-3 py-2 rounded-lg transition-colors duration-200 ${
+									isActive
+										? 'bg-blue-50 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 font-medium'
+										: 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
+								}`
+							}
+						>
+							<Icons.Automation />
+							<span className="ml-3 text-sm font-medium">AI Agent Orchestration</span>
+						</NavLink>
 					</div>
 				)}
 
@@ -816,6 +835,22 @@ const SideNavigation = memo(function SideNavigation({
 						>
 							<div className="w-6 h-6 flex items-center justify-center">
 								<Icons.Statistics />
+							</div>
+						</NavLink>
+						<NavLink
+							to="/agent-orchestration"
+							data-tooltip-id="sidebar-tooltip"
+							data-tooltip-content="AI Agent Orchestration"
+							className={({ isActive }) =>
+								`flex items-center justify-center p-3 rounded-md transition-colors duration-200 ${
+									isActive
+										? 'bg-blue-50 dark:bg-blue-600/20 text-blue-700 dark:text-blue-400'
+										: 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
+								}`
+							}
+						>
+							<div className="w-6 h-6 flex items-center justify-center">
+								<Icons.Automation />
 							</div>
 						</NavLink>
 						<button

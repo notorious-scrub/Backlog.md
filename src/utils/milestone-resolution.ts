@@ -1,4 +1,4 @@
-import type { Milestone } from "../../types/index.ts";
+import type { Milestone } from "../types/index.ts";
 
 export function normalizeMilestoneName(name: string): string {
 	return name.trim();

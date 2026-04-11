@@ -11,6 +11,7 @@ import type {
 	Task,
 } from "../types/index.ts";
 import type { ContentStore, ContentStoreEvent } from "./content-store.ts";
+import { milestoneKey } from "./milestones.ts";
 
 interface BaseSearchEntity {
 	readonly id: string;
@@ -25,6 +26,8 @@ interface TaskSearchEntity extends BaseSearchEntity {
 	readonly statusLower: string;
 	readonly priorityLower?: SearchPriorityFilter;
 	readonly labelsLower: string[];
+	readonly milestoneValue?: string;
+	readonly milestoneKeyValue?: string;
 	readonly idVariants: string[];
 	readonly dependencyIds: string[];
 }
@@ -45,6 +48,8 @@ type NormalizedFilters = {
 	statuses?: string[];
 	priorities?: SearchPriorityFilter[];
 	labels?: string[];
+	milestones?: string[];
+	withoutMilestone?: boolean;
 };
 
 // Regex pattern to match any prefix (letters followed by dash)
@@ -223,6 +228,8 @@ export class SearchService {
 			statusLower: task.status.toLowerCase(),
 			priorityLower: task.priority ? (task.priority.toLowerCase() as SearchPriorityFilter) : undefined,
 			labelsLower: (task.labels || []).map((label) => label.toLowerCase()),
+			milestoneValue: task.milestone?.trim() || undefined,
+			milestoneKeyValue: milestoneKey(task.milestone ?? ""),
 			idVariants: createTaskIdVariants(task.id),
 			dependencyIds: (task.dependencies ?? []).flatMap((dependency) => createTaskIdVariants(dependency)),
 		}));
@@ -331,6 +338,17 @@ export class SearchService {
 				return task.labelsLower.some((label) => requiredLabels.has(label));
 			});
 		}
+		if (filters.withoutMilestone) {
+			filtered = filtered.filter((task) => !task.milestoneValue);
+		} else if (filters.milestones && filters.milestones.length > 0) {
+			const requiredMilestones = new Set(filters.milestones);
+			filtered = filtered.filter((task) => {
+				if (!task.milestoneKeyValue) {
+					return false;
+				}
+				return requiredMilestones.has(task.milestoneKeyValue);
+			});
+		}
 		return filtered;
 	}
 
@@ -357,6 +375,15 @@ export class SearchService {
 				return false;
 			}
 		}
+		if (filters.withoutMilestone) {
+			if (task.milestoneValue) {
+				return false;
+			}
+		} else if (filters.milestones && filters.milestones.length > 0) {
+			if (!task.milestoneKeyValue || !filters.milestones.includes(task.milestoneKeyValue)) {
+				return false;
+			}
+		}
 
 		return true;
 	}
@@ -369,11 +396,15 @@ export class SearchService {
 		const statuses = this.normalizeStringArray(filters.status);
 		const priorities = this.normalizePriorityArray(filters.priority);
 		const labels = this.normalizeLabelsArray(filters.labels);
+		const milestones = this.normalizeMilestonesArray(filters.milestone);
+		const withoutMilestone = Boolean(filters.withoutMilestone);
 
 		return {
 			statuses,
 			priorities,
 			labels,
+			milestones,
+			withoutMilestone,
 		};
 	}
 
@@ -395,6 +426,17 @@ export class SearchService {
 
 		const values = Array.isArray(value) ? value : [value];
 		const normalized = values.map((item) => item.trim().toLowerCase()).filter((item) => item.length > 0);
+
+		return normalized.length > 0 ? normalized : undefined;
+	}
+
+	private normalizeMilestonesArray(value?: string | string[]): string[] | undefined {
+		if (!value) {
+			return undefined;
+		}
+
+		const values = Array.isArray(value) ? value : [value];
+		const normalized = values.map((item) => milestoneKey(item)).filter((item) => item.length > 0);
 
 		return normalized.length > 0 ? normalized : undefined;
 	}

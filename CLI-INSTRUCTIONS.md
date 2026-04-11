@@ -45,11 +45,14 @@ You can rerun the wizard anytime with `backlog config`. All existing CLI flags (
 | Create with docs | `backlog task create "Feature" --doc https://design-docs.example.com --doc docs/spec.md` |
 | Create sub task | `backlog task create -p 14 "Add Login with Google"`|
 | Create (all options) | `backlog task create "Feature" -d "Description" -a @sara -s "To Do" -l auth --priority high --ac "Must work" --notes "Initial setup done" --dep task-1 --ref src/api.ts --doc docs/spec.md -p 14` |
-| List tasks  | `backlog task list [-s <status>] [-a <assignee>] [-p <parent>]` |
+| Create with milestone | `backlog task create "Feature" --milestone "Release 1.0"` |
+| List tasks  | `backlog task list [-s <status>] [-a <assignee>] [-p <parent>] [-m <milestone-or-none>]` |
 | List by parent | `backlog task list --parent 42` or `backlog task list -p task-42` |
 | View detail | `backlog task 7` (interactive UI, press 'E' to edit in editor) |
 | View (AI mode) | `backlog task 7 --plain`                           |
 | Edit        | `backlog task edit 7 -a @sara -l auth,backend`       |
+| Bulk set milestone | `backlog task milestone 7 8 --milestone "Release 1.0"` |
+| Bulk clear milestone | `backlog task milestone 7 8 --clear` |
 | Add plan    | `backlog task edit 7 --plan "Implementation approach"`    |
 | Add AC      | `backlog task edit 7 --ac "New criterion" --ac "Another one"` |
 | Add DoD     | `backlog task edit 7 --dod "Ship notes"` |
@@ -68,6 +71,8 @@ You can rerun the wizard anytime with `backlog config`. All existing CLI flags (
 | Append final summary | `backlog task edit 7 --append-final-summary "More details"` |
 | Clear final summary | `backlog task edit 7 --clear-final-summary` |
 | Add deps    | `backlog task edit 7 --dep task-1 --dep task-2`     |
+| Set milestone | `backlog task edit 7 --milestone "Release 1.0"` |
+| Clear milestone | `backlog task edit 7 --clear-milestone` (alias: `--no-milestone`) |
 | Archive     | `backlog task archive 7`                             |
 
 ### Multi-line input (description/plan/notes/final summary)
@@ -88,6 +93,31 @@ The CLI preserves input literally; `\n` sequences are not auto-converted. Use on
 
 Tip: Help text shows Bash examples with escaped `\\n` for readability; when typing, `$'\n'` expands to a newline.
 
+## Milestones
+
+Milestone files live under `backlog/milestones/`. The CLI mirrors the common
+web flows: create files, rename (optionally rewriting tasks), remove (archive +
+task cleanup), list with optional discovery output, and view one record.
+
+| Action | Example |
+|--------|---------|
+| Help | `backlog milestone --help` |
+| List (by task completion buckets) | `backlog milestone list --plain` |
+| List completed buckets too | `backlog milestone list --show-completed --plain` |
+| Append discovery report (files + orphan task labels) | `backlog milestone list --discovery --plain` |
+| View one milestone | `backlog milestone view m-0 --plain` or `backlog milestone view "Release 1.0" --plain` |
+| Add milestone file | `backlog milestone add "Release 1.0" -d "Scope and exit criteria"` or `backlog milestone add` in a TTY wizard |
+| Edit milestone description | `backlog milestone edit "Release 1.0" -d "Revised scope and exit criteria"` or `backlog milestone edit` in a TTY wizard |
+| Rename milestone file | `backlog milestone rename "Old" "New"` (updates matching tasks by default) |
+| Rename without touching tasks | `backlog milestone rename "Old" "New" --no-update-tasks` |
+| Remove (archives file; default clears tasks) | `backlog milestone remove "Release 1.0"` |
+| Remove but keep task labels | `backlog milestone remove "Release 1.0" --tasks keep` |
+| Remove and reassign tasks | `backlog milestone remove "Release 1.0" --tasks reassign --reassign-to "Other"` |
+| Archive only | `backlog milestone archive m-3` |
+
+**Multi-line milestone description** uses the same rules as tasks (Bash
+`$'…'`, POSIX `printf`, PowerShell `` `n ``).
+
 ## Search
 
 Find tasks, documents, and decisions across your entire backlog with fuzzy search:
@@ -97,6 +127,8 @@ Find tasks, documents, and decisions across your entire backlog with fuzzy searc
 | Search tasks       | `backlog search "auth"`                        |
 | Filter by status   | `backlog search "api" --status "In Progress"`   |
 | Filter by priority | `backlog search "bug" --priority high`        |
+| Filter by milestone | `backlog search "release" --milestone "Release 1.0"` |
+| Search tasks with no milestone | `backlog search --type task --milestone none` |
 | Combine filters    | `backlog search "web" --status "To Do" --priority medium` |
 | Plain text output  | `backlog search "feature" --plain` (for scripts/AI) |
 
@@ -110,6 +142,7 @@ Find tasks, documents, and decisions across your entire backlog with fuzzy searc
 | Action      | Example                                              |
 |-------------|------------------------------------------------------|
 | Create draft | `backlog task create "Feature" --draft`             |
+| Draft with milestone | `backlog draft create "Spike" --milestone "Exploration"` |
 | Draft flow  | `backlog draft create "Spike GraphQL"` → `backlog draft promote 3.1` |
 | Demote to draft| `backlog task demote <id>` |
 

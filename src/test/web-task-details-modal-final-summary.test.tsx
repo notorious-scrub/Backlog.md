@@ -51,6 +51,7 @@ describe("Web task popup Final Summary display", () => {
 
 		expect(html).toContain("Final Summary");
 		expect(html).toContain("PR-style summary");
+		expect(html).toContain("Audit Log");
 	});
 
 	it("hides Final Summary section in preview when empty", () => {

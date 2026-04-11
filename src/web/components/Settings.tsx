@@ -1,14 +1,26 @@
 import React, { useState, useEffect } from "react";
 import { apiClient } from "../lib/api";
 import { SuccessToast } from "./SuccessToast";
-import type { BacklogConfig } from "../../types";
+import AgentOrchestrationSettingsSection from "./AgentOrchestrationSettingsSection";
+import type {
+	AgentAutomationConfig,
+	AgentAutomationQueueItem,
+	AutomatedQaRunRecord,
+	AutomatedQaState,
+	BacklogConfig,
+	TaskAuditEvent,
+} from "../../types";
 import {
 	getDefaultStatusColor,
 	normalizeHexColor,
 	normalizeStatusColorMap,
 } from "../utils/status-colors";
 
-const Settings: React.FC = () => {
+interface SettingsProps {
+	mode?: "general" | "automation";
+}
+
+const Settings: React.FC<SettingsProps> = ({ mode = "general" }) => {
 	const [config, setConfig] = useState<BacklogConfig | null>(null);
 	const [originalConfig, setOriginalConfig] = useState<BacklogConfig | null>(null);
 	const [loading, setLoading] = useState(true);
@@ -17,10 +29,181 @@ const Settings: React.FC = () => {
 	const [showSuccess, setShowSuccess] = useState(false);
 	const [newStatus, setNewStatus] = useState("");
 	const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
+	const [automatedQaState, setAutomatedQaState] = useState<AutomatedQaState>({
+		queuedTaskIds: [],
+		activeTaskIds: [],
+	});
+	const [automatedQaRuns, setAutomatedQaRuns] = useState<AutomatedQaRunRecord[]>([]);
+	const [automatedQaStaleThresholdMs, setAutomatedQaStaleThresholdMs] = useState(60000);
+	const [automationAuditEvents, setAutomationAuditEvents] = useState<TaskAuditEvent[]>([]);
+	const [automationAuditError, setAutomationAuditError] = useState<string | null>(null);
 
 	useEffect(() => {
 		loadConfig();
 	}, []);
+
+	const loadAutomatedQa = async () => {
+		try {
+			const [data, auditPage] = await Promise.all([
+				apiClient.fetchAutomatedQa(),
+				apiClient.fetchAgentAutomationAuditLog({ limit: 20 }),
+			]);
+			setAutomatedQaState(data.state);
+			setAutomatedQaRuns(data.recentRuns);
+			setAutomatedQaStaleThresholdMs(data.staleThresholdMs);
+			setAutomationAuditEvents(auditPage.events.filter((event) => event.eventType.startsWith("automation_")));
+			setAutomationAuditError(null);
+		} catch {
+			setAutomatedQaState({ queuedTaskIds: [], activeTaskIds: [] });
+			setAutomatedQaRuns([]);
+			setAutomatedQaStaleThresholdMs(60000);
+			setAutomationAuditEvents([]);
+			setAutomationAuditError("Failed to load automation audit log");
+		}
+	};
+
+	const normalizeAgentAutomationConfig = (
+		automation: AgentAutomationConfig | undefined,
+		index: number,
+	): AgentAutomationConfig => {
+		const triggerType = automation?.trigger?.type === "label_added" ? "label_added" : "status_transition";
+		const triggerStatus = automation?.trigger?.toStatus?.trim() || (triggerType === "status_transition" ? "QA" : "");
+		const labelsAny = Array.from(
+			new Set((automation?.trigger?.labelsAny ?? []).map((value) => value.trim()).filter((value) => value.length > 0)),
+		);
+		const addedLabelsAny = Array.from(
+			new Set(
+				(automation?.trigger?.addedLabelsAny ?? []).map((value) => value.trim()).filter((value) => value.length > 0),
+			),
+		);
+		const assigneesAny = Array.from(
+			new Set(
+				(automation?.trigger?.assigneesAny ?? []).map((value) => value.trim()).filter((value) => value.length > 0),
+			),
+		);
+		return {
+			id: automation?.id?.trim() || (index === 0 ? "automated-qa" : `automation-${index + 1}`),
+			name: automation?.name?.trim() || (index === 0 ? "Automated QA" : `Automation ${index + 1}`),
+			enabled: Boolean(automation?.enabled),
+			paused: Boolean(automation?.paused),
+			trigger: {
+				type: triggerType,
+				...(triggerStatus ? { toStatus: triggerStatus } : {}),
+				...(automation?.trigger?.fromStatus?.trim() ? { fromStatus: automation.trigger.fromStatus.trim() } : {}),
+				...(labelsAny.length > 0 ? { labelsAny } : {}),
+				...(addedLabelsAny.length > 0 ? { addedLabelsAny } : {}),
+				...(assigneesAny.length > 0 ? { assigneesAny } : {}),
+			},
+			codexCommand: automation?.codexCommand?.trim() || "codex",
+			agentName: automation?.agentName?.trim() || "qa_engineer",
+			reviewerAssignee: automation?.reviewerAssignee?.trim() || "QA",
+			timeoutSeconds:
+				typeof automation?.timeoutSeconds === "number" && Number.isFinite(automation.timeoutSeconds)
+					? automation.timeoutSeconds
+					: 180,
+			maxConcurrentRuns:
+				typeof automation?.maxConcurrentRuns === "number" && Number.isFinite(automation.maxConcurrentRuns)
+					? Math.max(1, Math.floor(automation.maxConcurrentRuns))
+					: 1,
+			...(automation?.promptTemplate?.trim() ? { promptTemplate: automation.promptTemplate.trim() } : {}),
+		};
+	};
+
+	const normalizeAgentAutomations = (value: BacklogConfig): AgentAutomationConfig[] => {
+		const entries =
+			Array.isArray(value.agentAutomations) && value.agentAutomations.length > 0
+				? value.agentAutomations
+				: [
+						{
+							id: "automated-qa",
+							name: "Automated QA",
+							enabled: value.automatedQa?.enabled,
+							paused: value.automatedQa?.paused,
+							trigger: {
+								type: "status_transition" as const,
+								toStatus: value.automatedQa?.triggerStatus?.trim() || "QA",
+							},
+							codexCommand: value.automatedQa?.codexCommand,
+							agentName: value.automatedQa?.agentName,
+							reviewerAssignee: value.automatedQa?.reviewerAssignee,
+							timeoutSeconds: value.automatedQa?.timeoutSeconds,
+							maxConcurrentRuns: 1,
+						},
+					];
+		return entries.map((automation, index) => normalizeAgentAutomationConfig(automation, index));
+	};
+
+	const syncPrimaryAutomationFromAutomatedQa = (value: BacklogConfig): BacklogConfig => {
+		const automations = normalizeAgentAutomations(value);
+		const primary = normalizeAgentAutomationConfig(
+			{
+				...automations[0],
+				id: automations[0]?.id || "automated-qa",
+				name: automations[0]?.name || "Automated QA",
+				enabled: value.automatedQa?.enabled,
+				paused: value.automatedQa?.paused,
+				trigger: {
+					...(automations[0]?.trigger ?? { type: "status_transition" }),
+					type: "status_transition",
+					toStatus: value.automatedQa?.triggerStatus?.trim() || "QA",
+				},
+				codexCommand: value.automatedQa?.codexCommand,
+				agentName: value.automatedQa?.agentName,
+				reviewerAssignee: value.automatedQa?.reviewerAssignee,
+				timeoutSeconds: value.automatedQa?.timeoutSeconds,
+				maxConcurrentRuns: automations[0]?.maxConcurrentRuns ?? 1,
+			},
+			0,
+		);
+		return {
+			...value,
+			agentAutomations: [primary, ...automations.slice(1).map((automation, index) => normalizeAgentAutomationConfig(automation, index + 1))],
+		};
+	};
+
+	const getAutomationById = (automationId: string | undefined): AgentAutomationConfig | undefined => {
+		const automations = config?.agentAutomations ?? [];
+		return automations.find((automation) => automation.id === automationId);
+	};
+
+	const formatQueueItemLabel = (entry: AgentAutomationQueueItem): string => {
+		return `${entry.taskId} · ${entry.automationName ?? entry.automationId} · ${entry.triggerType}`;
+	};
+
+	const formatAutomatedQaTimestamp = (value: string | undefined): string => {
+		if (!value) {
+			return "n/a";
+		}
+		const parsed = new Date(value);
+		if (Number.isNaN(parsed.getTime())) {
+			return value;
+		}
+		return parsed.toLocaleString();
+	};
+
+	const isAutomatedQaRunStale = (run: AutomatedQaRunRecord): boolean => {
+		if (run.status !== "started" || !run.lastHeartbeatAt) {
+			return false;
+		}
+		const heartbeatMs = new Date(run.lastHeartbeatAt).getTime();
+		if (Number.isNaN(heartbeatMs)) {
+			return false;
+		}
+		return Date.now() - heartbeatMs > automatedQaStaleThresholdMs;
+	};
+
+	const formatAutomatedQaPhase = (phase: AutomatedQaRunRecord["phase"]): string => {
+		if (!phase) {
+			return "unknown";
+		}
+		return phase.replace(/_/g, " ");
+	};
+
+	const formatAutomatedQaOutput = (value: string | undefined): string => {
+		const trimmed = value?.trim();
+		return trimmed && trimmed.length > 0 ? trimmed : "none captured";
+	};
+
 
 	const normalizeStatuses = (items: string[] | undefined): string[] => {
 		const unique = new Set<string>();
@@ -45,10 +228,25 @@ const Settings: React.FC = () => {
 			const defaultStatus = normalizedStatuses.includes(data.defaultStatus ?? "")
 				? data.defaultStatus
 				: normalizedStatuses[0];
+			const agentAutomations = normalizeAgentAutomations(data);
+			const primaryAutomation = agentAutomations[0];
 			const normalizedData = {
 				...data,
 				statuses: normalizedStatuses.length > 0 ? normalizedStatuses : ["To Do", "In Progress", "Done"],
 				defaultStatus: defaultStatus ?? "To Do",
+				agentAutomations,
+				automatedQa: {
+					enabled: Boolean(primaryAutomation?.enabled),
+					paused: Boolean(primaryAutomation?.paused),
+					triggerStatus: primaryAutomation?.trigger?.toStatus?.trim() || "QA",
+					codexCommand: primaryAutomation?.codexCommand?.trim() || "codex",
+					agentName: primaryAutomation?.agentName?.trim() || "qa_engineer",
+					reviewerAssignee: primaryAutomation?.reviewerAssignee?.trim() || "QA",
+					timeoutSeconds:
+						typeof primaryAutomation?.timeoutSeconds === "number" && Number.isFinite(primaryAutomation.timeoutSeconds)
+							? primaryAutomation.timeoutSeconds
+							: 180,
+				},
 				statusColors: normalizeStatusColors(
 					normalizedStatuses.length > 0 ? normalizedStatuses : ["To Do", "In Progress", "Done"],
 					data.statusColors,
@@ -56,6 +254,7 @@ const Settings: React.FC = () => {
 			};
 			setConfig(normalizedData);
 			setOriginalConfig(normalizedData);
+			await loadAutomatedQa();
 			setError(null);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Failed to load configuration");
@@ -184,6 +383,47 @@ const Settings: React.FC = () => {
 			errors.defaultStatus = "Default status must be one of your configured statuses";
 		}
 
+		if (config.automatedQa?.enabled) {
+			const triggerStatus = config.automatedQa.triggerStatus?.trim() ?? "";
+			if (!triggerStatus) {
+				errors.automatedQaTriggerStatus = "Automated QA trigger status is required when the feature is enabled";
+			} else if (!normalizedStatuses.includes(triggerStatus)) {
+				errors.automatedQaTriggerStatus = "Automated QA trigger status must match one of your configured statuses";
+			}
+			const timeoutSeconds = Number(config.automatedQa.timeoutSeconds);
+			if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 7200) {
+				errors.automatedQaTimeoutSeconds = "Automated QA timeout must be between 30 and 7200 seconds";
+			}
+		}
+
+		const normalizedAutomations = normalizeAgentAutomations(syncPrimaryAutomationFromAutomatedQa(config));
+		normalizedAutomations.forEach((automation, index) => {
+			if (!automation.enabled) {
+				return;
+			}
+			const triggerStatus = automation.trigger?.toStatus?.trim() ?? "";
+			if (automation.trigger?.type !== "label_added" && !triggerStatus) {
+				errors[`agentAutomation-${index}-triggerStatus`] = `${automation.name} needs a trigger status`;
+			}
+			if (triggerStatus && !normalizedStatuses.includes(triggerStatus)) {
+				errors[`agentAutomation-${index}-triggerStatus`] =
+					`${automation.name} trigger status must match one of your configured statuses`;
+			}
+			const timeoutSeconds = Number(automation.timeoutSeconds);
+			if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 7200) {
+				errors[`agentAutomation-${index}-timeoutSeconds`] = `${automation.name} timeout must be between 30 and 7200 seconds`;
+			}
+			const maxConcurrentRuns = Number(automation.maxConcurrentRuns);
+			if (!Number.isFinite(maxConcurrentRuns) || maxConcurrentRuns < 1 || maxConcurrentRuns > 25) {
+				errors[`agentAutomation-${index}-maxConcurrentRuns`] =
+					`${automation.name} max concurrency must be between 1 and 25`;
+			}
+			if (automation.trigger?.type === "label_added" && (automation.trigger.addedLabelsAny ?? []).length === 0) {
+				errors[`agentAutomation-${index}-addedLabelsAny`] =
+					`${automation.name} needs at least one added label trigger`;
+			}
+		});
+
 		setValidationErrors(errors);
 		return Object.keys(errors).length === 0;
 	};
@@ -198,16 +438,35 @@ const Settings: React.FC = () => {
 			const normalizedDefaultStatus = fallbackStatuses.includes(config.defaultStatus ?? "")
 				? config.defaultStatus
 				: fallbackStatuses[0];
-			const normalizedConfig = {
+			const syncedConfig = syncPrimaryAutomationFromAutomatedQa({
 				...config,
 				statuses: fallbackStatuses,
 				defaultStatus: normalizedDefaultStatus,
 				statusColors: normalizeStatusColors(fallbackStatuses, config.statusColors),
 				definitionOfDone: normalizeDefinitionOfDone(config.definitionOfDone),
+			});
+			const normalizedConfig = {
+				...syncedConfig,
+				...config,
+				statuses: fallbackStatuses,
+				defaultStatus: normalizedDefaultStatus,
+				statusColors: normalizeStatusColors(fallbackStatuses, config.statusColors),
+				definitionOfDone: normalizeDefinitionOfDone(config.definitionOfDone),
+				agentAutomations: normalizeAgentAutomations(syncedConfig),
+				automatedQa: {
+					enabled: Boolean(config.automatedQa?.enabled),
+					paused: Boolean(config.automatedQa?.paused),
+					triggerStatus: config.automatedQa?.triggerStatus?.trim() || "QA",
+					codexCommand: config.automatedQa?.codexCommand?.trim() || "codex",
+					agentName: config.automatedQa?.agentName?.trim() || "qa_engineer",
+					reviewerAssignee: config.automatedQa?.reviewerAssignee?.trim() || "QA",
+					timeoutSeconds: Number(config.automatedQa?.timeoutSeconds) || 180,
+				},
 			};
 			await apiClient.updateConfig(normalizedConfig);
 			setConfig(normalizedConfig);
 			setOriginalConfig(normalizedConfig);
+			await loadAutomatedQa();
 			setShowSuccess(true);
 			setTimeout(() => setShowSuccess(false), 3000);
 			setError(null);
@@ -224,12 +483,16 @@ const Settings: React.FC = () => {
 	};
 
 	const hasUnsavedChanges = JSON.stringify(config) !== JSON.stringify(originalConfig);
+	const isAutomationMode = mode === "automation";
+	const pageTitle = isAutomationMode ? "AI Agent Orchestration" : "Settings";
+	const loadingLabel = isAutomationMode ? "Loading AI agent orchestration..." : "Loading settings...";
+	const loadFailureLabel = isAutomationMode ? "Failed to load AI agent orchestration" : "Failed to load configuration";
 
 	if (loading) {
 		return (
 			<div className="container mx-auto px-4 py-8">
 				<div className="flex items-center justify-center py-12">
-					<div className="text-lg text-gray-600 dark:text-gray-300">Loading settings...</div>
+					<div className="text-lg text-gray-600 dark:text-gray-300">{loadingLabel}</div>
 				</div>
 			</div>
 		);
@@ -239,7 +502,7 @@ const Settings: React.FC = () => {
 		return (
 			<div className="container mx-auto px-4 py-8">
 				<div className="flex items-center justify-center py-12">
-					<div className="text-red-600 dark:text-red-400">Failed to load configuration</div>
+					<div className="text-red-600 dark:text-red-400">{loadFailureLabel}</div>
 				</div>
 			</div>
 		);
@@ -248,7 +511,7 @@ const Settings: React.FC = () => {
 	return (
 		<div className="container mx-auto px-4 py-8 transition-colors duration-200">
 			<div className="max-w-4xl mx-auto">
-				<h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100 mb-8">Settings</h1>
+				<h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100 mb-8">{pageTitle}</h1>
 
 				{error && (
 					<div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg">
@@ -257,6 +520,25 @@ const Settings: React.FC = () => {
 				)}
 
 				<div className="space-y-8">
+					{isAutomationMode ? (
+						<AgentOrchestrationSettingsSection
+							config={config}
+							validationErrors={validationErrors}
+							automatedQaState={automatedQaState}
+							automatedQaRuns={automatedQaRuns}
+							automatedQaStaleThresholdMs={automatedQaStaleThresholdMs}
+							automationAuditEvents={automationAuditEvents}
+							automationAuditError={automationAuditError}
+							handleInputChange={handleInputChange}
+							getAutomationById={getAutomationById}
+							formatQueueItemLabel={formatQueueItemLabel}
+							formatAutomatedQaTimestamp={formatAutomatedQaTimestamp}
+							isAutomatedQaRunStale={isAutomatedQaRunStale}
+							formatAutomatedQaPhase={formatAutomatedQaPhase}
+							formatAutomatedQaOutput={formatAutomatedQaOutput}
+						/>
+					) : (
+						<>
 					{/* Project Settings */}
 					<div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
 						<h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Project Settings</h2>
@@ -633,6 +915,8 @@ const Settings: React.FC = () => {
 							</div>
 						</div>
 					</div>
+						</>
+					)}
 
 					{/* Save/Cancel Buttons */}
 						<div className="flex items-center justify-end space-x-4">

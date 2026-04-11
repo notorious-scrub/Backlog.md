@@ -147,12 +147,70 @@ export interface TaskUpdateInput {
 	rawContent?: string;
 }
 
+export type TaskAuditEventType =
+	| "task_status_changed"
+	| "task_assignee_changed"
+	| "task_labels_changed"
+	| "task_priority_changed"
+	| "task_milestone_changed"
+	| "automation_run_queued"
+	| "automation_run_dequeued"
+	| "automation_task_claimed"
+	| "automation_reviewer_launching"
+	| "automation_reviewer_started"
+	| "automation_reviewer_output"
+	| "automation_run_succeeded"
+	| "automation_run_failed"
+	| "automation_run_skipped"
+	| "automation_run_abandoned"
+	| "automation_queue_paused";
+
+export interface TaskAuditActor {
+	kind: "user" | "automation" | "system";
+	id?: string;
+	displayName?: string;
+	source?: "cli" | "web" | "automation-worker" | "status-callback";
+	automationId?: string;
+	automationName?: string;
+	queueEntryId?: string;
+	runId?: string;
+	agentName?: string;
+	processId?: number;
+}
+
+export interface TaskAuditEvent {
+	id: string;
+	taskId: string;
+	eventType: TaskAuditEventType;
+	occurredAt: string;
+	actor: TaskAuditActor;
+	summary: string;
+	data: Record<string, unknown>;
+}
+
+export interface TaskAuditEventFilter {
+	taskId?: string;
+	eventType?: TaskAuditEventType;
+	automationId?: string;
+	limit?: number;
+	cursor?: string;
+}
+
+export interface TaskAuditEventPage {
+	events: TaskAuditEvent[];
+	nextCursor?: string;
+}
+
 export interface TaskListFilter {
 	status?: string;
 	assignee?: string;
 	priority?: "high" | "medium" | "low";
 	parentTaskId?: string;
 	labels?: string[];
+	/** Canonical milestone id (after resolving user input against milestone files). */
+	milestoneId?: string;
+	/** When true, only tasks with no milestone set. */
+	withoutMilestone?: boolean;
 }
 
 export interface Decision {
@@ -204,6 +262,8 @@ export interface SearchFilters {
 	priority?: SearchPriorityFilter | SearchPriorityFilter[];
 	assignee?: string | string[];
 	labels?: string | string[];
+	milestone?: string | string[];
+	withoutMilestone?: boolean;
 }
 
 export interface SearchOptions {
@@ -253,6 +313,105 @@ export interface PrefixConfig {
 	task: string;
 }
 
+export interface AutomatedQaConfig {
+	enabled?: boolean;
+	paused?: boolean;
+	triggerStatus?: string;
+	codexCommand?: string;
+	agentName?: string;
+	reviewerAssignee?: string;
+	timeoutSeconds?: number;
+}
+
+export type AgentAutomationTriggerType = "status_transition" | "label_added";
+
+export interface AgentAutomationTriggerConfig {
+	type?: AgentAutomationTriggerType;
+	toStatus?: string;
+	fromStatus?: string;
+	labelsAny?: string[];
+	addedLabelsAny?: string[];
+	assigneesAny?: string[];
+}
+
+export interface AgentAutomationConfig {
+	id?: string;
+	name?: string;
+	enabled?: boolean;
+	paused?: boolean;
+	trigger?: AgentAutomationTriggerConfig;
+	codexCommand?: string;
+	agentName?: string;
+	reviewerAssignee?: string;
+	timeoutSeconds?: number;
+	maxConcurrentRuns?: number;
+	promptTemplate?: string;
+}
+
+export interface AgentAutomationQueueItem {
+	id: string;
+	taskId: string;
+	automationId: string;
+	automationName?: string;
+	triggerType: AgentAutomationTriggerType;
+	triggerStatus?: string;
+	triggerSignature: string;
+	queuedAt: string;
+}
+
+export interface AutomatedQaState {
+	queuedTaskIds: string[];
+	activeTaskIds: string[];
+	queuedRuns?: AgentAutomationQueueItem[];
+	activeRuns?: AgentAutomationQueueItem[];
+	lastRunAt?: string;
+	lastCompletedTaskId?: string;
+	lastError?: string;
+}
+
+export type AutomatedQaRunStatus = "queued" | "started" | "succeeded" | "failed" | "abandoned" | "skipped";
+
+export type AutomatedQaRunPhase =
+	| "queued"
+	| "worker_claimed"
+	| "reviewer_launching"
+	| "reviewer_running"
+	| "reviewer_completed"
+	| "reviewer_failed"
+	| "abandoned"
+	| "skipped";
+
+export interface AutomatedQaRunRecord {
+	id: string;
+	taskId: string;
+	queueEntryId?: string;
+	automationId?: string;
+	automationName?: string;
+	triggerType?: AgentAutomationTriggerType;
+	triggerSignature?: string;
+	status: AutomatedQaRunStatus;
+	phase?: AutomatedQaRunPhase;
+	triggerStatus: string;
+	agentName: string;
+	reviewerAssignee: string;
+	queuedAt: string;
+	startedAt?: string;
+	completedAt?: string;
+	lastHeartbeatAt?: string;
+	lastHeartbeatNote?: string;
+	workerPid?: number;
+	codexPid?: number;
+	codexCommand?: string;
+	stdoutExcerpt?: string;
+	stderrExcerpt?: string;
+	lastOutputAt?: string;
+	lastOutputSource?: "stdout" | "stderr";
+	lastOutputExcerpt?: string;
+	error?: string;
+	exitCode?: number;
+	finalTaskStatus?: string;
+}
+
 export interface BacklogConfig {
 	projectName: string;
 	defaultAssignee?: string;
@@ -279,6 +438,8 @@ export interface BacklogConfig {
 	activeBranchDays?: number; // How many days a branch is considered active (default: 30)
 	/** Global callback command to run on any task status change. Supports $TASK_ID, $OLD_STATUS, $NEW_STATUS, $TASK_TITLE variables. */
 	onStatusChange?: string;
+	agentAutomations?: AgentAutomationConfig[];
+	automatedQa?: AutomatedQaConfig;
 	/** ID prefix configuration for tasks and drafts. Defaults to { task: "task", draft: "draft" } */
 	prefixes?: PrefixConfig;
 	mcp?: {

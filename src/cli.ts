@@ -10,8 +10,28 @@ import { runAdvancedConfigWizard } from "./commands/advanced-config-wizard.ts";
 import { type CompletionInstallResult, installCompletion, registerCompletionCommand } from "./commands/completion.ts";
 import { configureAdvancedSettings } from "./commands/configure-advanced-settings.ts";
 import { registerMcpCommand } from "./commands/mcp.ts";
+import {
+	pickMilestoneForEditWizard,
+	runMilestoneCreateWizard,
+	runMilestoneEditWizard,
+} from "./commands/milestone-wizard.ts";
 import { pickTaskForEditWizard, runTaskCreateWizard, runTaskEditWizard } from "./commands/task-wizard.ts";
+import {
+	clearWorkerLock,
+	drainAutomatedQaQueue,
+	ensureWorkerLock,
+	resetAutomatedQaActiveState,
+} from "./core/automated-qa.ts";
 import { initializeProject } from "./core/init.ts";
+import {
+	addMilestoneForProject,
+	buildMilestoneListReport,
+	bulkUpdateTaskMilestonesForProject,
+	editMilestoneForProject,
+	MilestoneMutationError,
+	removeMilestoneForProject,
+	renameMilestoneForProject,
+} from "./core/milestone-mutations.ts";
 import { buildMilestoneBuckets, collectArchivedMilestoneKeys, milestoneKey } from "./core/milestones.ts";
 import { computeSequences } from "./core/sequences.ts";
 import { formatTaskPlainText } from "./formatters/task-plain-text.ts";
@@ -50,6 +70,7 @@ import { viewTaskEnhanced } from "./ui/task-viewer-with-search.ts";
 import { scrollableViewer } from "./ui/tui.ts";
 import { type AgentSelectionValue, processAgentSelection } from "./utils/agent-selection.ts";
 import { findBacklogRoot } from "./utils/find-backlog-root.ts";
+import { resolveMilestoneInputFromLists } from "./utils/milestone-input.ts";
 import { hasAnyPrefix } from "./utils/prefix-config.ts";
 import { type RuntimeCwdResolution, resolveRuntimeCwd } from "./utils/runtime-cwd.ts";
 import { formatValidStatuses, getCanonicalStatus, getValidStatuses } from "./utils/status.ts";
@@ -63,6 +84,14 @@ import { buildTaskUpdateInput } from "./utils/task-edit-builder.ts";
 import { normalizeTaskId, taskIdsEqual } from "./utils/task-path.ts";
 import { sortTasks } from "./utils/task-sorting.ts";
 import { getVersion } from "./utils/version.ts";
+
+async function resolveMilestoneForCli(core: Core, raw: string): Promise<string> {
+	const [active, archived] = await Promise.all([
+		core.filesystem.listMilestones(),
+		core.filesystem.listArchivedMilestones(),
+	]);
+	return resolveMilestoneInputFromLists(active, archived, raw);
+}
 
 type IntegrationMode = "mcp" | "cli" | "none";
 
@@ -161,6 +190,11 @@ function printMissingRequiredArgument(argumentName: string): void {
 	process.exitCode = 1;
 }
 
+function printMissingRequiredOption(optionSpec: string): void {
+	console.error(`error: required option '${optionSpec}' not specified`);
+	process.exitCode = 1;
+}
+
 function hasCreateFieldFlags(options: Record<string, unknown>): boolean {
 	return Boolean(
 		options.description !== undefined ||
@@ -182,7 +216,8 @@ function hasCreateFieldFlags(options: Record<string, unknown>): boolean {
 			options.dependsOn !== undefined ||
 			options.dep !== undefined ||
 			options.ref !== undefined ||
-			options.doc !== undefined,
+			options.doc !== undefined ||
+			options.milestone !== undefined,
 	);
 }
 
@@ -217,7 +252,10 @@ function hasEditFieldFlags(options: Record<string, unknown>): boolean {
 			options.dependsOn !== undefined ||
 			options.dep !== undefined ||
 			options.ref !== undefined ||
-			options.doc !== undefined,
+			options.doc !== undefined ||
+			options.milestone !== undefined ||
+			options.clearMilestone ||
+			options.noMilestone,
 	);
 }
 
@@ -1229,6 +1267,7 @@ taskCmd
 	.option("--plan <text>", "add implementation plan")
 	.option("--notes <text>", "add implementation notes")
 	.option("--final-summary <text>", "add final summary")
+	.option("--milestone <name>", "attach to a milestone (id, m-N, or title)")
 	.option("--draft")
 	.option("-p, --parent <taskId>", "specify parent task ID")
 	.option(
@@ -1292,6 +1331,9 @@ taskCmd
 		if (createAsDraft) {
 			createInput.status = "Draft";
 		}
+		if (options.milestone !== undefined && String(options.milestone).trim().length > 0) {
+			createInput.milestone = await resolveMilestoneForCli(core, String(options.milestone));
+		}
 
 		try {
 			const { task, filePath } = await core.createTaskFromInput(createInput);
@@ -1315,11 +1357,16 @@ program
 	.option("--type <type>", "limit results to type (task, document, decision)", createMultiValueAccumulator())
 	.option("--status <status>", "filter task results by status")
 	.option("--priority <priority>", "filter task results by priority (high, medium, low)")
+	.option(
+		"-m, --milestone <name>",
+		'filter task results by milestone (id, m-N, or title); use "none" for tasks with no milestone',
+	)
 	.option("--limit <number>", "limit total results returned")
 	.option("--plain", "print plain text output instead of interactive UI")
 	.action(async (query: string | undefined, options) => {
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
+		await core.ensureConfigLoaded();
 		const searchService = await core.getSearchService();
 		const contentStore = await core.getContentStore();
 		const cleanup = () => {
@@ -1341,7 +1388,12 @@ program
 					})
 			: allowedTypes;
 
-		const filters: { status?: string; priority?: SearchPriorityFilter } = {};
+		const filters: {
+			status?: string;
+			priority?: SearchPriorityFilter;
+			milestone?: string;
+			withoutMilestone?: boolean;
+		} = {};
 		if (options.status) {
 			filters.status = options.status;
 		}
@@ -1355,6 +1407,19 @@ program
 				return;
 			}
 			filters.priority = priorityLower as SearchPriorityFilter;
+		}
+		let interactiveTaskMilestoneFilter: TaskListFilter | undefined;
+		if (options.milestone !== undefined) {
+			const rawMilestone = String(options.milestone).trim();
+			const milestoneLower = rawMilestone.toLowerCase();
+			if (!rawMilestone || milestoneLower === "none" || milestoneLower === "__none") {
+				filters.withoutMilestone = true;
+				interactiveTaskMilestoneFilter = { withoutMilestone: true };
+			} else {
+				const resolvedMilestone = await resolveMilestoneForCli(core, rawMilestone);
+				filters.milestone = resolvedMilestone;
+				interactiveTaskMilestoneFilter = { milestoneId: resolvedMilestone };
+			}
 		}
 
 		let limit: number | undefined;
@@ -1386,9 +1451,9 @@ program
 		const taskResults = searchResults.filter(isTaskSearchResult);
 		const searchResultTasks = taskResults.map((result) => result.task);
 
-		const allTasks = (await core.queryTasks()).filter(
-			(task) => task.id && task.id.trim() !== "" && hasAnyPrefix(task.id),
-		);
+		const allTasks = (
+			await core.queryTasks({ filters: interactiveTaskMilestoneFilter, includeCrossBranch: false })
+		).filter((task) => task.id && task.id.trim() !== "" && hasAnyPrefix(task.id));
 
 		// If no tasks exist at all, show plain text results
 		if (allTasks.length === 0) {
@@ -1413,6 +1478,7 @@ program
 				filterDescription: buildSearchFilterDescription({
 					status: statusFilter,
 					priority: priorityFilter,
+					milestone: options.milestone,
 					query: query ?? "",
 				}),
 				status: statusFilter,
@@ -1426,6 +1492,7 @@ program
 function buildSearchFilterDescription(filters: {
 	status?: string;
 	priority?: SearchPriorityFilter;
+	milestone?: string;
 	query?: string;
 }): string {
 	const parts: string[] = [];
@@ -1437,6 +1504,9 @@ function buildSearchFilterDescription(filters: {
 	}
 	if (filters.priority) {
 		parts.push(`Priority: ${filters.priority}`);
+	}
+	if (filters.milestone) {
+		parts.push(`Milestone: ${filters.milestone}`);
 	}
 	return parts.join(" • ");
 }
@@ -1529,12 +1599,17 @@ taskCmd
 	.option("-s, --status <status>", "filter tasks by status (case-insensitive)")
 	.option("-a, --assignee <assignee>", "filter tasks by assignee")
 	.option("-p, --parent <taskId>", "filter tasks by parent task ID")
+	.option(
+		"-m, --milestone <name>",
+		'filter tasks by milestone (id, m-N, or title); use "none" for tasks with no milestone',
+	)
 	.option("--priority <priority>", "filter tasks by priority (high, medium, low)")
 	.option("--sort <field>", "sort tasks by field (priority, id)")
 	.option("--plain", "use plain text output instead of interactive UI")
 	.action(async (options) => {
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
+		await core.ensureConfigLoaded();
 		const cleanup = () => {
 			core.disposeSearchService();
 			core.disposeContentStore();
@@ -1563,6 +1638,15 @@ taskCmd
 			const parentInput = String(options.parent);
 			parentId = normalizeTaskId(parentInput);
 			baseFilters.parentTaskId = parentInput;
+		}
+
+		if (options.milestone !== undefined) {
+			const raw = String(options.milestone).trim().toLowerCase();
+			if (!raw || raw === "none" || raw === "__none") {
+				baseFilters.withoutMilestone = true;
+			} else {
+				baseFilters.milestoneId = await resolveMilestoneForCli(core, String(options.milestone));
+			}
 		}
 
 		if (options.sort) {
@@ -1683,6 +1767,14 @@ taskCmd
 			activeFilters.push(`Parent: ${normalizeTaskId(String(options.parent))}`);
 		}
 		if (options.priority) activeFilters.push(`Priority: ${options.priority}`);
+		if (options.milestone !== undefined) {
+			const raw = String(options.milestone).trim();
+			activeFilters.push(
+				!raw || raw.toLowerCase() === "none" || raw.toLowerCase() === "__none"
+					? "Milestone: none"
+					: `Milestone: ${raw}`,
+			);
+		}
 		if (options.sort) activeFilters.push(`Sort: ${options.sort}`);
 
 		if (activeFilters.length > 0) {
@@ -1837,6 +1929,9 @@ taskCmd
 		const soFar = Array.isArray(previous) ? previous : previous ? [previous] : [];
 		return [...soFar, value];
 	})
+	.option("--milestone <name>", "set milestone (id, m-N, or title)")
+	.option("--clear-milestone", "remove milestone from the task")
+	.option("--no-milestone", "same as --clear-milestone")
 	.action(async (taskId: string | undefined, options) => {
 		const shouldUseWizard = hasInteractiveTTY && !hasEditFieldFlags(options);
 		if (!shouldUseWizard && !taskId) {
@@ -2101,6 +2196,18 @@ taskCmd
 			editArgs.definitionOfDoneUncheck = uncheckDod;
 		}
 
+		const clearMilestone = Boolean(options.clearMilestone || options.noMilestone);
+		if (clearMilestone && options.milestone !== undefined) {
+			console.error("Use either --clear-milestone / --no-milestone or --milestone, not both.");
+			process.exitCode = 1;
+			return;
+		}
+		if (clearMilestone) {
+			editArgs.milestone = null;
+		} else if (options.milestone !== undefined) {
+			editArgs.milestone = await resolveMilestoneForCli(core, String(options.milestone));
+		}
+
 		let updatedTask: Task;
 		try {
 			const updateInput = buildTaskUpdateInput(editArgs);
@@ -2121,6 +2228,38 @@ taskCmd
 	});
 
 // Note: Implementation notes appending is handled via `task edit --append-notes` only.
+
+taskCmd
+	.command("milestone <taskIds...>")
+	.description("set or clear a milestone for one or more local tasks")
+	.option("-m, --milestone <name>", "milestone id, m-N alias, or title to assign")
+	.option("--clear", "clear the milestone from the specified tasks")
+	.action(async (taskIds: string[], options: { milestone?: string; clear?: boolean }) => {
+		const hasMilestoneOption = options.milestone !== undefined && String(options.milestone).trim().length > 0;
+		const shouldClear = Boolean(options.clear);
+		if (hasMilestoneOption === shouldClear) {
+			console.error("Specify exactly one of --milestone <name> or --clear.");
+			process.exitCode = 1;
+			return;
+		}
+
+		const cwd = await requireProjectRoot();
+		const core = new Core(cwd);
+		await core.ensureConfigLoaded();
+
+		try {
+			const milestone = shouldClear ? null : await resolveMilestoneForCli(core, String(options.milestone));
+			const text = await bulkUpdateTaskMilestonesForProject(core, { taskIds, milestone });
+			console.log(text);
+		} catch (error) {
+			if (error instanceof MilestoneMutationError) {
+				console.error(error.message);
+			} else {
+				console.error(error instanceof Error ? error.message : String(error));
+			}
+			process.exitCode = 1;
+		}
+	});
 
 taskCmd
 	.command("view <taskId>")
@@ -2187,7 +2326,7 @@ taskCmd
 		const core = new Core(cwd);
 
 		// Don't handle commands that should be handled by specific command handlers
-		const reservedCommands = ["create", "list", "edit", "view", "archive", "demote"];
+		const reservedCommands = ["create", "list", "edit", "milestone", "view", "archive", "demote"];
 		if (taskId && reservedCommands.includes(taskId)) {
 			console.error(`Unknown command: ${taskId}`);
 			taskCmd.help();
@@ -2301,13 +2440,18 @@ draftCmd
 	.option("-a, --assignee <assignee>")
 	.option("-s, --status <status>")
 	.option("-l, --labels <labels>")
+	.option("--milestone <name>", "attach to a milestone (id, m-N, or title)")
 	.action(async (title: string, options) => {
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
 		await core.ensureConfigLoaded();
 		try {
+			const draftInput = buildTaskCreateInputFromOptions(title, options);
+			if (options.milestone !== undefined && String(options.milestone).trim().length > 0) {
+				draftInput.milestone = await resolveMilestoneForCli(core, String(options.milestone));
+			}
 			const { task, filePath } = await core.createTaskFromInput({
-				...buildTaskCreateInputFromOptions(title, options),
+				...draftInput,
 				status: "Draft",
 			});
 			console.log(`Created draft ${task.id}`);
@@ -2416,14 +2560,20 @@ draftCmd
 		await viewTaskEnhanced(draft, { startWithDetailFocus: true, core });
 	});
 
-const milestoneCmd = program.command("milestone").aliases(["milestones"]);
+const milestoneCmd = program
+	.command("milestone")
+	.aliases(["milestones"])
+	.description(
+		"Manage milestone records (add, list, view, edit, rename, remove, archive). Pair with `task create` / `task edit --milestone` to attach work.",
+	);
 
 milestoneCmd
 	.command("list")
 	.description("list milestones with completion status")
 	.option("--show-completed", "show completed milestones")
+	.option("--discovery", "append milestone files and task-only milestone discovery report")
 	.option("--plain", "use plain text output")
-	.action(async (options: { showCompleted?: boolean; plain?: boolean }) => {
+	.action(async (options: { showCompleted?: boolean; plain?: boolean; discovery?: boolean }) => {
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
 		await core.ensureConfigLoaded();
@@ -2465,6 +2615,243 @@ milestoneCmd
 			}
 		} else {
 			console.log("  (collapsed, use --show-completed to list)");
+		}
+
+		if (options.discovery) {
+			console.log("\n");
+			console.log(await buildMilestoneListReport(core));
+		}
+	});
+
+milestoneCmd
+	.command("view <name>")
+	.description("print milestone id, title, and description (active or archived)")
+	.option("--plain", "use plain text output")
+	.action(async (name: string, options: { plain?: boolean }) => {
+		const cwd = await requireProjectRoot();
+		const core = new Core(cwd);
+		await core.ensureConfigLoaded();
+		const [active, archived] = await Promise.all([
+			core.filesystem.listMilestones(),
+			core.filesystem.listArchivedMilestones(),
+		]);
+		const resolvedId = resolveMilestoneInputFromLists(active, archived, name);
+		let record: Milestone | null = await core.filesystem.loadMilestone(resolvedId);
+		if (!record) {
+			record = archived.find((m) => milestoneKey(m.id) === milestoneKey(resolvedId)) ?? null;
+		}
+		if (!record) {
+			console.error(`Milestone "${name}" not found.`);
+			process.exitCode = 1;
+			return;
+		}
+		const usePlainOutput = isPlainRequested(options) || shouldAutoPlain;
+		const body = (record.description ?? "").trim() || "(no description)";
+		if (usePlainOutput) {
+			console.log(`${record.id} — ${record.title}`);
+			console.log("");
+			console.log(body);
+			return;
+		}
+		console.log(`${record.id} — ${record.title}\n`);
+		console.log(body);
+	});
+
+milestoneCmd
+	.command("add [title]")
+	.description("create a milestone file")
+	.option(
+		"-d, --description <text>",
+		"milestone description (multi-line: bash $'Line1\\nLine2', POSIX printf, PowerShell \"Line1`nLine2\")",
+	)
+	.action(async (title: string | undefined, options: { description?: string }) => {
+		const shouldUseWizard = hasInteractiveTTY && title === undefined;
+		if (!shouldUseWizard && (title === undefined || title.trim().length === 0)) {
+			printMissingRequiredArgument("title");
+			return;
+		}
+
+		const cwd = await requireProjectRoot();
+		const core = new Core(cwd);
+		await core.ensureConfigLoaded();
+		if (shouldUseWizard) {
+			const wizardValues = await runMilestoneCreateWizard();
+			if (!wizardValues) {
+				clack.cancel("Milestone create cancelled.");
+				return;
+			}
+			try {
+				const milestone = await addMilestoneForProject(core, wizardValues.title, wizardValues.description);
+				console.log(`Created milestone "${milestone.title}" (${milestone.id}).`);
+			} catch (error) {
+				if (error instanceof MilestoneMutationError) {
+					console.error(error.message);
+				} else {
+					console.error(error instanceof Error ? error.message : String(error));
+				}
+				process.exitCode = 1;
+			}
+			return;
+		}
+		try {
+			const milestone = await addMilestoneForProject(core, title ?? "", options.description);
+			console.log(`Created milestone "${milestone.title}" (${milestone.id}).`);
+		} catch (error) {
+			if (error instanceof MilestoneMutationError) {
+				console.error(error.message);
+			} else {
+				console.error(error instanceof Error ? error.message : String(error));
+			}
+			process.exitCode = 1;
+		}
+	});
+
+milestoneCmd
+	.command("edit [name]")
+	.description("update milestone description")
+	.option(
+		"-d, --description <text>",
+		"milestone description (multi-line: bash $'Line1\\nLine2', POSIX printf, PowerShell \"Line1`nLine2\")",
+	)
+	.action(async (name: string | undefined, options: { description?: string }) => {
+		const shouldUseWizard = hasInteractiveTTY && (name === undefined || options.description === undefined);
+		if (!shouldUseWizard && (name === undefined || name.trim().length === 0)) {
+			printMissingRequiredArgument("name");
+			return;
+		}
+		if (!shouldUseWizard && options.description === undefined) {
+			printMissingRequiredOption("-d, --description <text>");
+			return;
+		}
+
+		const cwd = await requireProjectRoot();
+		const core = new Core(cwd);
+		await core.ensureConfigLoaded();
+		try {
+			const activeMilestones = await core.filesystem.listMilestones();
+			if (activeMilestones.length === 0 && name === undefined) {
+				console.error("No active milestones found.");
+				process.exitCode = 1;
+				return;
+			}
+
+			let targetName = name?.trim();
+			if (shouldUseWizard && !targetName) {
+				targetName = await pickMilestoneForEditWizard({
+					milestones: activeMilestones.map((milestone) => ({
+						id: milestone.id,
+						title: milestone.title,
+						description: milestone.description,
+					})),
+				});
+				if (!targetName) {
+					clack.cancel("Milestone edit cancelled.");
+					return;
+				}
+			}
+
+			if (!targetName) {
+				printMissingRequiredArgument("name");
+				return;
+			}
+
+			const resolvedId = resolveMilestoneInputFromLists(activeMilestones, [], targetName);
+			const milestoneRecord = activeMilestones.find(
+				(milestone) => milestoneKey(milestone.id) === milestoneKey(resolvedId),
+			);
+			if (!milestoneRecord) {
+				console.error(`Milestone not found: "${targetName}"`);
+				process.exitCode = 1;
+				return;
+			}
+
+			let description = options.description;
+			if (shouldUseWizard && description === undefined) {
+				const wizardValues = await runMilestoneEditWizard({ milestone: milestoneRecord });
+				if (!wizardValues) {
+					clack.cancel("Milestone edit cancelled.");
+					return;
+				}
+				description = wizardValues.description;
+			}
+			if (description === undefined) {
+				printMissingRequiredOption("-d, --description <text>");
+				return;
+			}
+
+			const text = await editMilestoneForProject(core, {
+				name: milestoneRecord.id,
+				description,
+			});
+			console.log(text);
+		} catch (error) {
+			if (error instanceof MilestoneMutationError) {
+				console.error(error.message);
+			} else {
+				console.error(error instanceof Error ? error.message : String(error));
+			}
+			process.exitCode = 1;
+		}
+	});
+
+milestoneCmd
+	.command("rename <from> <to>")
+	.description("rename a milestone file and update matching tasks by default")
+	.option("--no-update-tasks", "do not rewrite task milestone fields")
+	.action(async (from: string, to: string, options: { noUpdateTasks?: boolean }) => {
+		const cwd = await requireProjectRoot();
+		const core = new Core(cwd);
+		await core.ensureConfigLoaded();
+		try {
+			const text = await renameMilestoneForProject(core, {
+				from,
+				to,
+				updateTasks: !options.noUpdateTasks,
+			});
+			console.log(text);
+		} catch (error) {
+			if (error instanceof MilestoneMutationError) {
+				console.error(error.message);
+			} else {
+				console.error(error instanceof Error ? error.message : String(error));
+			}
+			process.exitCode = 1;
+		}
+	});
+
+milestoneCmd
+	.command("remove <name>")
+	.description("archive milestone file and optionally clear or reassign tasks that reference it")
+	.option(
+		"--tasks <mode>",
+		"clear: clear matching task milestones (default) | keep: leave tasks unchanged | reassign: move to --reassign-to",
+		"clear",
+	)
+	.option("--reassign-to <name>", "target milestone when --tasks reassign")
+	.action(async (name: string, options: { tasks?: string; reassignTo?: string }) => {
+		const cwd = await requireProjectRoot();
+		const core = new Core(cwd);
+		await core.ensureConfigLoaded();
+		const mode = String(options.tasks ?? "clear").toLowerCase();
+		if (mode !== "clear" && mode !== "keep" && mode !== "reassign") {
+			console.error(`Invalid --tasks value "${options.tasks}". Use clear, keep, or reassign.`);
+			process.exitCode = 1;
+			return;
+		}
+		try {
+			const text = await removeMilestoneForProject(core, {
+				name,
+				taskHandling: mode as "clear" | "keep" | "reassign",
+				reassignTo: options.reassignTo,
+			});
+			console.log(text);
+		} catch (error) {
+			if (error instanceof MilestoneMutationError) {
+				console.error(error.message);
+			} else {
+				console.error(error instanceof Error ? error.message : String(error));
+			}
+			process.exitCode = 1;
 		}
 	});
 
@@ -3191,7 +3578,7 @@ configCmd
 					if (key === "milestones") {
 						console.error("milestones cannot be set directly.");
 						console.error(
-							"Use milestone files via milestone commands (e.g. `backlog milestone list`, `backlog milestone add`).",
+							"Use milestone commands (e.g. `backlog milestone add`, `backlog milestone edit`, `backlog milestone rename`, `backlog milestone remove`, `backlog milestone archive`).",
 						);
 					} else if (key === "definitionOfDone") {
 						console.error("definitionOfDone cannot be set directly.");
@@ -3392,6 +3779,34 @@ program
 		} catch (err) {
 			console.error("Failed to run cleanup", err);
 			process.exitCode = 1;
+		}
+	});
+
+// Browser command for web UI
+program
+	.command("qa-worker")
+	.description("run the automated QA queue worker")
+	.option("--project-root <path>", "project root to process")
+	.action(async (options) => {
+		let projectRoot = "";
+		let lockAcquired = false;
+		try {
+			projectRoot = options.projectRoot ? String(options.projectRoot) : await requireProjectRoot();
+			lockAcquired = await ensureWorkerLock(projectRoot);
+			if (!lockAcquired) {
+				return;
+			}
+
+			const core = new Core(projectRoot);
+			await resetAutomatedQaActiveState(projectRoot);
+			await drainAutomatedQaQueue(core);
+		} catch (err) {
+			console.error("Automated QA worker failed", err);
+			process.exitCode = 1;
+		} finally {
+			if (projectRoot && lockAcquired) {
+				await clearWorkerLock(projectRoot);
+			}
 		}
 	});
 

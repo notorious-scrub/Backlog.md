@@ -7,13 +7,13 @@ import {
 	type TaskListFilter,
 } from "../../../types/index.ts";
 import type { TaskEditArgs, TaskEditRequest } from "../../../types/task-edit-args.ts";
+import { milestoneKey } from "../../../utils/milestone-resolution.ts";
 import { buildTaskUpdateInput } from "../../../utils/task-edit-builder.ts";
 import { createTaskSearchIndex } from "../../../utils/task-search.ts";
 import { sortTasks } from "../../../utils/task-sorting.ts";
 import { McpError } from "../../errors/mcp-errors.ts";
 import type { McpServer } from "../../server.ts";
 import type { CallToolResult } from "../../types.ts";
-import { milestoneKey } from "../../utils/milestone-resolution.ts";
 import { formatTaskCallResult } from "../../utils/task-response.ts";
 
 export type TaskCreateArgs = {

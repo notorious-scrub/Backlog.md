@@ -16,6 +16,29 @@ export interface StatusCallbackResult {
 	exitCode?: number;
 }
 
+function buildWindowsCallbackCommand(command: string): string {
+	return command
+		.replace(/\$([A-Z_][A-Z0-9_]*)/g, (_match, name: string) => `\${env:${name}}`)
+		.replace(/\becho\s+(.+?)\s+>&2(?=\s*(?:;|&&|$))/g, "[Console]::Error.WriteLine($1)")
+		.replace(/\s*&&\s*/g, "; if (-not $?) { exit 1 }; ");
+}
+
+function buildCallbackInvocation(command: string): string[] {
+	if (process.platform === "win32") {
+		return [
+			"powershell",
+			"-NoProfile",
+			"-NonInteractive",
+			"-ExecutionPolicy",
+			"Bypass",
+			"-Command",
+			buildWindowsCallbackCommand(command),
+		];
+	}
+
+	return ["sh", "-c", command];
+}
+
 /**
  * Executes a status change callback command with variable injection.
  * Variables are passed as environment variables to the shell command.
@@ -38,17 +61,14 @@ export async function executeStatusCallback(options: StatusCallbackOptions): Pro
 			NEW_STATUS: newStatus,
 			TASK_TITLE: taskTitle,
 		};
-
 		const proc = spawn({
-			cmd: ["sh", "-c", command],
+			cmd: buildCallbackInvocation(command),
 			cwd,
 			env,
 			stdout: "pipe",
 			stderr: "pipe",
 		});
-
 		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-
 		const exitCode = await proc.exited;
 		const success = exitCode === 0;
 

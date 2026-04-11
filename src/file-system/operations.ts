@@ -1,10 +1,22 @@
-import { mkdir, rename, unlink } from "node:fs/promises";
+import { appendFile, mkdir, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DEFAULT_DIRECTORIES, DEFAULT_FILES, DEFAULT_STATUSES } from "../constants/index.ts";
 import { parseDecision, parseDocument, parseMilestone, parseTask } from "../markdown/parser.ts";
 import { serializeDecision, serializeDocument, serializeTask } from "../markdown/serializer.ts";
-import type { BacklogConfig, Decision, Document, Milestone, Task, TaskListFilter } from "../types/index.ts";
+import type {
+	AgentAutomationConfig,
+	BacklogConfig,
+	Decision,
+	Document,
+	Milestone,
+	Task,
+	TaskAuditEvent,
+	TaskAuditEventFilter,
+	TaskAuditEventPage,
+	TaskAuditEventType,
+	TaskListFilter,
+} from "../types/index.ts";
 import { documentIdsEqual, normalizeDocumentId } from "../utils/document-id.ts";
 import {
 	buildGlobPattern,
@@ -108,6 +120,10 @@ export class FileSystem {
 		return join(this.backlogDir, DEFAULT_DIRECTORIES.MILESTONES);
 	}
 
+	get auditLogDir(): string {
+		return join(this.backlogDir, DEFAULT_DIRECTORIES.AUDIT_LOG);
+	}
+
 	get configFilePath(): string {
 		return join(this.backlogDir, DEFAULT_FILES.CONFIG);
 	}
@@ -161,6 +177,16 @@ export class FileSystem {
 		return join(backlogDir, DEFAULT_DIRECTORIES.MILESTONES);
 	}
 
+	private async getAuditLogDir(): Promise<string> {
+		const backlogDir = await this.getBacklogDir();
+		return join(backlogDir, DEFAULT_DIRECTORIES.AUDIT_LOG);
+	}
+
+	private async getAuditLogEventsPath(): Promise<string> {
+		const auditLogDir = await this.getAuditLogDir();
+		return join(auditLogDir, DEFAULT_FILES.AUDIT_EVENTS);
+	}
+
 	private async getCompletedDir(): Promise<string> {
 		const backlogDir = await this.getBacklogDir();
 		return join(backlogDir, DEFAULT_DIRECTORIES.COMPLETED);
@@ -179,6 +205,7 @@ export class FileSystem {
 			join(backlogDir, DEFAULT_DIRECTORIES.ARCHIVE_MILESTONES),
 			join(backlogDir, DEFAULT_DIRECTORIES.DOCS),
 			join(backlogDir, DEFAULT_DIRECTORIES.DECISIONS),
+			join(backlogDir, DEFAULT_DIRECTORIES.AUDIT_LOG),
 		];
 
 		for (const dir of directories) {
@@ -285,6 +312,88 @@ export class FileSystem {
 		}
 
 		return sortByTaskId(tasks);
+	}
+
+	async appendTaskAuditEvent(event: TaskAuditEvent): Promise<void> {
+		const normalized = this.normalizeTaskAuditEvent(event);
+		if (!normalized) {
+			return;
+		}
+		const auditPath = await this.getAuditLogEventsPath();
+		await this.ensureDirectoryExists(dirname(auditPath));
+		await appendFile(auditPath, `${JSON.stringify(normalized)}\n`, "utf8");
+	}
+
+	async appendTaskAuditEvents(events: TaskAuditEvent[]): Promise<void> {
+		const normalizedEvents = events
+			.map((event) => this.normalizeTaskAuditEvent(event))
+			.filter((event): event is TaskAuditEvent => event !== null);
+		if (normalizedEvents.length === 0) {
+			return;
+		}
+		const auditPath = await this.getAuditLogEventsPath();
+		await this.ensureDirectoryExists(dirname(auditPath));
+		const payload = `${normalizedEvents.map((event) => JSON.stringify(event)).join("\n")}\n`;
+		await appendFile(auditPath, payload, "utf8");
+	}
+
+	async listTaskAuditEvents(filter: TaskAuditEventFilter = {}): Promise<TaskAuditEventPage> {
+		const auditPath = await this.getAuditLogEventsPath();
+		const file = Bun.file(auditPath);
+		if (!(await file.exists())) {
+			return { events: [] };
+		}
+
+		const normalizedTaskId = filter.taskId?.trim().toUpperCase();
+		const normalizedAutomationId = filter.automationId?.trim().toLowerCase();
+		const eventType = filter.eventType;
+		const limit =
+			typeof filter.limit === "number" && Number.isFinite(filter.limit)
+				? Math.min(200, Math.max(1, Math.floor(filter.limit)))
+				: 100;
+		const cursor = filter.cursor?.trim();
+
+		const lines = (await file.text()).split(/\r?\n/).filter((line) => line.trim().length > 0);
+		const matchingEvents: TaskAuditEvent[] = [];
+		for (let index = lines.length - 1; index >= 0; index -= 1) {
+			const line = lines[index];
+			if (!line) {
+				continue;
+			}
+			try {
+				const parsed = this.normalizeTaskAuditEvent(JSON.parse(line) as TaskAuditEvent);
+				if (!parsed) {
+					continue;
+				}
+				if (normalizedTaskId && parsed.taskId.toUpperCase() !== normalizedTaskId) {
+					continue;
+				}
+				if (eventType && parsed.eventType !== eventType) {
+					continue;
+				}
+				if (
+					normalizedAutomationId &&
+					(parsed.actor.automationId ?? String(parsed.data.automationId ?? "")).trim().toLowerCase() !==
+						normalizedAutomationId
+				) {
+					continue;
+				}
+				matchingEvents.push(parsed);
+			} catch {
+				// Ignore malformed audit lines and continue rendering the rest of the timeline.
+			}
+		}
+
+		const startIndex = cursor ? matchingEvents.findIndex((event) => event.id === cursor) + 1 : 0;
+		const safeStart = startIndex > 0 ? startIndex : 0;
+		const events = matchingEvents.slice(safeStart, safeStart + limit);
+		const nextCursor =
+			safeStart + limit < matchingEvents.length ? matchingEvents[safeStart + limit - 1]?.id : undefined;
+
+		return {
+			events,
+			...(nextCursor ? { nextCursor } : {}),
+		};
 	}
 
 	async listCompletedTasks(): Promise<Task[]> {
@@ -861,6 +970,23 @@ ${rawContent.trim()}
 		});
 	}
 
+	private updateMilestoneDescriptionSection(rawContent: string, description: string): string {
+		const normalizedRawContent = rawContent.replace(/\r\n/g, "\n").trim();
+		const normalizedDescription = description.replace(/\r\n/g, "\n").trim();
+		const descriptionSection = normalizedDescription ? `## Description\n\n${normalizedDescription}` : "## Description";
+		const descriptionSectionPattern = /##\s+Description\s*(?:\n[\s\S]*?)?(?=(?:\n)##\s+|$)/i;
+
+		if (!normalizedRawContent) {
+			return descriptionSection;
+		}
+
+		if (descriptionSectionPattern.test(normalizedRawContent)) {
+			return normalizedRawContent.replace(descriptionSectionPattern, descriptionSection);
+		}
+
+		return `${descriptionSection}\n\n${normalizedRawContent}`;
+	}
+
 	private async findMilestoneFile(
 		identifier: string,
 		scope: "active" | "archived" = "active",
@@ -1149,6 +1275,51 @@ ${description || `Milestone: ${title}`}`,
 		}
 	}
 
+	async updateMilestoneDescription(
+		identifier: string,
+		description: string,
+	): Promise<{
+		success: boolean;
+		filePath?: string;
+		milestone?: Milestone;
+		previousDescription?: string;
+		originalContent?: string;
+	}> {
+		const normalizedIdentifier = identifier.trim();
+		if (!normalizedIdentifier) {
+			return { success: false };
+		}
+
+		try {
+			const milestoneMatch = await this.findMilestoneFile(normalizedIdentifier, "active");
+			if (!milestoneMatch) {
+				return { success: false };
+			}
+
+			const updatedRawContent = this.updateMilestoneDescriptionSection(
+				milestoneMatch.milestone.rawContent,
+				description,
+			);
+			const updatedContent = this.serializeMilestoneContent(
+				milestoneMatch.milestone.id,
+				milestoneMatch.milestone.title,
+				updatedRawContent,
+			);
+
+			await Bun.write(milestoneMatch.filepath, updatedContent);
+
+			return {
+				success: true,
+				filePath: milestoneMatch.filepath,
+				milestone: parseMilestone(updatedContent),
+				previousDescription: milestoneMatch.milestone.description,
+				originalContent: milestoneMatch.content,
+			};
+		} catch {
+			return { success: false };
+		}
+	}
+
 	async archiveMilestone(identifier: string): Promise<{
 		success: boolean;
 		sourcePath?: string;
@@ -1309,6 +1480,93 @@ ${description || `Milestone: ${title}`}`,
 		}
 	}
 
+	private normalizeTaskAuditEvent(event: Partial<TaskAuditEvent> | null | undefined): TaskAuditEvent | null {
+		const id = typeof event?.id === "string" ? event.id.trim() : "";
+		const taskId = typeof event?.taskId === "string" ? event.taskId.trim() : "";
+		const eventType = this.normalizeTaskAuditEventType(event?.eventType);
+		const occurredAtRaw = typeof event?.occurredAt === "string" ? event.occurredAt.trim() : "";
+		const occurredAtDate = new Date(occurredAtRaw);
+		if (!id || !taskId || !eventType || !occurredAtRaw || Number.isNaN(occurredAtDate.getTime())) {
+			return null;
+		}
+
+		const actorKind =
+			event?.actor?.kind === "user" || event?.actor?.kind === "automation" || event?.actor?.kind === "system"
+				? event.actor.kind
+				: "system";
+		const actorSource =
+			event?.actor?.source === "cli" ||
+			event?.actor?.source === "web" ||
+			event?.actor?.source === "automation-worker" ||
+			event?.actor?.source === "status-callback"
+				? event.actor.source
+				: undefined;
+		const processId =
+			typeof event?.actor?.processId === "number" && Number.isFinite(event.actor.processId)
+				? Math.floor(event.actor.processId)
+				: undefined;
+		const data =
+			event?.data && typeof event.data === "object" && !Array.isArray(event.data)
+				? (event.data as Record<string, unknown>)
+				: {};
+		return {
+			id,
+			taskId,
+			eventType,
+			occurredAt: occurredAtDate.toISOString(),
+			actor: {
+				kind: actorKind,
+				...(typeof event?.actor?.id === "string" && event.actor.id.trim() ? { id: event.actor.id.trim() } : {}),
+				...(typeof event?.actor?.displayName === "string" && event.actor.displayName.trim()
+					? { displayName: event.actor.displayName.trim() }
+					: {}),
+				...(actorSource ? { source: actorSource } : {}),
+				...(typeof event?.actor?.automationId === "string" && event.actor.automationId.trim()
+					? { automationId: event.actor.automationId.trim() }
+					: {}),
+				...(typeof event?.actor?.automationName === "string" && event.actor.automationName.trim()
+					? { automationName: event.actor.automationName.trim() }
+					: {}),
+				...(typeof event?.actor?.queueEntryId === "string" && event.actor.queueEntryId.trim()
+					? { queueEntryId: event.actor.queueEntryId.trim() }
+					: {}),
+				...(typeof event?.actor?.runId === "string" && event.actor.runId.trim()
+					? { runId: event.actor.runId.trim() }
+					: {}),
+				...(typeof event?.actor?.agentName === "string" && event.actor.agentName.trim()
+					? { agentName: event.actor.agentName.trim() }
+					: {}),
+				...(processId !== undefined ? { processId } : {}),
+			},
+			summary: typeof event?.summary === "string" && event.summary.trim().length > 0 ? event.summary.trim() : eventType,
+			data,
+		};
+	}
+
+	private normalizeTaskAuditEventType(value: unknown): TaskAuditEventType | undefined {
+		switch (value) {
+			case "task_status_changed":
+			case "task_assignee_changed":
+			case "task_labels_changed":
+			case "task_priority_changed":
+			case "task_milestone_changed":
+			case "automation_run_queued":
+			case "automation_run_dequeued":
+			case "automation_task_claimed":
+			case "automation_reviewer_launching":
+			case "automation_reviewer_started":
+			case "automation_reviewer_output":
+			case "automation_run_succeeded":
+			case "automation_run_failed":
+			case "automation_run_skipped":
+			case "automation_run_abandoned":
+			case "automation_queue_paused":
+				return value;
+			default:
+				return undefined;
+		}
+	}
+
 	private parseConfig(content: string): BacklogConfig {
 		const config: Partial<BacklogConfig> = {};
 		const lines = content.split("\n");
@@ -1414,11 +1672,51 @@ ${description || `Milestone: ${title}`}`,
 					// Remove surrounding quotes if present, but preserve inner content
 					config.onStatusChange = value.replace(/^['"]|['"]$/g, "");
 					break;
+				case "automated_qa":
+				case "automatedQa":
+					if (value.startsWith("{") && value.endsWith("}")) {
+						try {
+							const parsed = JSON.parse(value) as Record<string, unknown>;
+							config.automatedQa = {
+								enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : undefined,
+								paused: typeof parsed.paused === "boolean" ? parsed.paused : undefined,
+								triggerStatus:
+									typeof parsed.triggerStatus === "string" ? parsed.triggerStatus.trim() || undefined : undefined,
+								codexCommand:
+									typeof parsed.codexCommand === "string" ? parsed.codexCommand.trim() || undefined : undefined,
+								agentName: typeof parsed.agentName === "string" ? parsed.agentName.trim() || undefined : undefined,
+								reviewerAssignee:
+									typeof parsed.reviewerAssignee === "string" ? parsed.reviewerAssignee.trim() || undefined : undefined,
+								timeoutSeconds:
+									typeof parsed.timeoutSeconds === "number" && Number.isFinite(parsed.timeoutSeconds)
+										? parsed.timeoutSeconds
+										: undefined,
+							};
+						} catch {
+							// Ignore malformed automated QA config and continue parsing other fields.
+						}
+					}
+					break;
+				case "agent_automations":
+				case "agentAutomations":
+					if (value.startsWith("[") && value.endsWith("]")) {
+						try {
+							const parsed = JSON.parse(value) as unknown;
+							config.agentAutomations = this.normalizeAgentAutomations(parsed);
+						} catch {
+							// Ignore malformed agent automation config and continue parsing other fields.
+						}
+					}
+					break;
 				case "task_prefix":
 					config.prefixes = { task: value.replace(/['"]/g, "") };
 					break;
 			}
 		}
+
+		const normalizedAgentAutomations = this.normalizeAgentAutomations(config.agentAutomations, config.automatedQa);
+		const normalizedAutomatedQa =
+			config.automatedQa ?? this.deriveAutomatedQaCompatibilityConfig(normalizedAgentAutomations);
 
 		return {
 			projectName: config.projectName || "",
@@ -1441,6 +1739,8 @@ ${description || `Milestone: ${title}`}`,
 			checkActiveBranches: config.checkActiveBranches,
 			activeBranchDays: config.activeBranchDays,
 			onStatusChange: config.onStatusChange,
+			agentAutomations: normalizedAgentAutomations,
+			automatedQa: normalizedAutomatedQa,
 			prefixes: config.prefixes,
 		};
 	}
@@ -1456,6 +1756,9 @@ ${description || `Milestone: ${title}`}`,
 			}
 			normalizedStatusColors[trimmedStatus] = trimmedColor;
 		}
+		const normalizedAgentAutomations = this.normalizeAgentAutomations(config.agentAutomations, config.automatedQa);
+		const automatedQaCompatibility =
+			config.automatedQa ?? this.deriveAutomatedQaCompatibilityConfig(normalizedAgentAutomations);
 		const lines = [
 			`project_name: "${config.projectName}"`,
 			...(config.defaultAssignee ? [`default_assignee: "${config.defaultAssignee}"`] : []),
@@ -1483,6 +1786,10 @@ ${description || `Milestone: ${title}`}`,
 				: []),
 			...(typeof config.activeBranchDays === "number" ? [`active_branch_days: ${config.activeBranchDays}`] : []),
 			...(config.onStatusChange ? [`onStatusChange: '${config.onStatusChange}'`] : []),
+			...(normalizedAgentAutomations.length > 0
+				? [`agent_automations: ${JSON.stringify(normalizedAgentAutomations)}`]
+				: []),
+			...(automatedQaCompatibility ? [`automated_qa: ${JSON.stringify(automatedQaCompatibility)}`] : []),
 			...(config.prefixes?.task ? [`task_prefix: "${config.prefixes.task}"`] : []),
 		];
 
@@ -1498,5 +1805,134 @@ ${description || `Milestone: ${title}`}`,
 			.filter((item): item is string => typeof item === "string")
 			.map((item) => item.trim())
 			.filter((item) => item.length > 0);
+	}
+
+	private normalizeAgentAutomations(
+		agentAutomations: unknown,
+		automatedQa?: BacklogConfig["automatedQa"],
+	): AgentAutomationConfig[] {
+		const normalized = Array.isArray(agentAutomations)
+			? agentAutomations
+					.map((entry, index) => this.normalizeAgentAutomationConfig(entry, index))
+					.filter((entry): entry is AgentAutomationConfig => entry !== null)
+			: [];
+		if (normalized.length > 0) {
+			return normalized;
+		}
+		if (!automatedQa) {
+			return [];
+		}
+		return [
+			{
+				id: "automated-qa",
+				name: "Automated QA",
+				enabled: automatedQa.enabled,
+				paused: automatedQa.paused,
+				trigger: {
+					type: "status_transition",
+					toStatus: automatedQa.triggerStatus,
+				},
+				codexCommand: automatedQa.codexCommand,
+				agentName: automatedQa.agentName,
+				reviewerAssignee: automatedQa.reviewerAssignee,
+				timeoutSeconds: automatedQa.timeoutSeconds,
+				maxConcurrentRuns: 1,
+			},
+		];
+	}
+
+	private normalizeAgentAutomationConfig(entry: unknown, index: number): AgentAutomationConfig | null {
+		if (!entry || typeof entry !== "object") {
+			return null;
+		}
+		const parsed = entry as Record<string, unknown>;
+		const id =
+			typeof parsed.id === "string" && parsed.id.trim().length > 0 ? parsed.id.trim() : `automation-${index + 1}`;
+		const name =
+			typeof parsed.name === "string" && parsed.name.trim().length > 0 ? parsed.name.trim() : `Automation ${index + 1}`;
+		const trigger =
+			parsed.trigger && typeof parsed.trigger === "object" ? (parsed.trigger as Record<string, unknown>) : {};
+		const triggerType = trigger.type === "label_added" ? "label_added" : "status_transition";
+		const toStatus =
+			typeof trigger.toStatus === "string" && trigger.toStatus.trim().length > 0
+				? trigger.toStatus.trim()
+				: typeof parsed.triggerStatus === "string" && parsed.triggerStatus.trim().length > 0
+					? parsed.triggerStatus.trim()
+					: undefined;
+		const fromStatus =
+			typeof trigger.fromStatus === "string" && trigger.fromStatus.trim().length > 0
+				? trigger.fromStatus.trim()
+				: undefined;
+		const labelsAny = this.normalizeStringConfigList(trigger.labelsAny);
+		const addedLabelsAny = this.normalizeStringConfigList(trigger.addedLabelsAny);
+		const assigneesAny = this.normalizeStringConfigList(trigger.assigneesAny);
+		const promptTemplate =
+			typeof parsed.promptTemplate === "string" && parsed.promptTemplate.trim().length > 0
+				? parsed.promptTemplate.trim()
+				: undefined;
+		return {
+			id,
+			name,
+			enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : undefined,
+			paused: typeof parsed.paused === "boolean" ? parsed.paused : undefined,
+			trigger: {
+				type: triggerType,
+				...(toStatus ? { toStatus } : {}),
+				...(fromStatus ? { fromStatus } : {}),
+				...(labelsAny ? { labelsAny } : {}),
+				...(addedLabelsAny ? { addedLabelsAny } : {}),
+				...(assigneesAny ? { assigneesAny } : {}),
+			},
+			codexCommand:
+				typeof parsed.codexCommand === "string" && parsed.codexCommand.trim().length > 0
+					? parsed.codexCommand.trim()
+					: undefined,
+			agentName:
+				typeof parsed.agentName === "string" && parsed.agentName.trim().length > 0
+					? parsed.agentName.trim()
+					: undefined,
+			reviewerAssignee:
+				typeof parsed.reviewerAssignee === "string" && parsed.reviewerAssignee.trim().length > 0
+					? parsed.reviewerAssignee.trim()
+					: undefined,
+			timeoutSeconds:
+				typeof parsed.timeoutSeconds === "number" && Number.isFinite(parsed.timeoutSeconds)
+					? parsed.timeoutSeconds
+					: undefined,
+			maxConcurrentRuns:
+				typeof parsed.maxConcurrentRuns === "number" && Number.isFinite(parsed.maxConcurrentRuns)
+					? Math.max(1, Math.floor(parsed.maxConcurrentRuns))
+					: undefined,
+			...(promptTemplate ? { promptTemplate } : {}),
+		};
+	}
+
+	private normalizeStringConfigList(items: unknown): string[] | undefined {
+		if (!Array.isArray(items)) {
+			return undefined;
+		}
+		const normalized = items
+			.filter((item): item is string => typeof item === "string")
+			.map((item) => item.trim())
+			.filter((item) => item.length > 0);
+		return normalized.length > 0 ? Array.from(new Set(normalized)) : undefined;
+	}
+
+	private deriveAutomatedQaCompatibilityConfig(
+		agentAutomations: AgentAutomationConfig[],
+	): BacklogConfig["automatedQa"] | undefined {
+		const source = agentAutomations.find((automation) => automation.id === "automated-qa") ?? agentAutomations[0];
+		if (!source) {
+			return undefined;
+		}
+		return {
+			enabled: source.enabled,
+			paused: source.paused,
+			triggerStatus: source.trigger?.toStatus,
+			codexCommand: source.codexCommand,
+			agentName: source.agentName,
+			reviewerAssignee: source.reviewerAssignee,
+			timeoutSeconds: source.timeoutSeconds,
+		};
 	}
 }

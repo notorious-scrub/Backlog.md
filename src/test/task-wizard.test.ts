@@ -305,7 +305,7 @@ describe("task wizard", () => {
 		expect(input).not.toBeNull();
 		expect(input?.status).toBe("To Do");
 		expect(promptQuestions.status?.initial).toBe("To Do");
-		expect(promptQuestions.status?.optionValues).toEqual(["Draft", "To Do", "In Progress", "Done"]);
+		expect(promptQuestions.status?.optionValues).toEqual(["Draft", "To Do", "In Progress", "On Hold", "Done"]);
 	});
 
 	it("labels task DoD and single-line text limitations clearly", async () => {

@@ -22,7 +22,7 @@ describe("Board loading with checkActiveBranches config", () => {
 			loadConfig: async () =>
 				({
 					projectName: "Test",
-					statuses: ["To Do", "In Progress", "Done"],
+					statuses: ["To Do", "In Progress", "On Hold", "Done"],
 					defaultStatus: "To Do",
 					checkActiveBranches: false,
 					activeBranchDays: 30,
@@ -81,7 +81,7 @@ describe("Board loading with checkActiveBranches config", () => {
 			loadConfig: async () =>
 				({
 					projectName: "Test",
-					statuses: ["To Do", "In Progress", "Done"],
+					statuses: ["To Do", "In Progress", "On Hold", "Done"],
 					defaultStatus: "To Do",
 					checkActiveBranches: true,
 					activeBranchDays: 30,
@@ -140,7 +140,7 @@ describe("Board loading with checkActiveBranches config", () => {
 			loadConfig: async () =>
 				({
 					projectName: "Test",
-					statuses: ["To Do", "In Progress", "Done"],
+					statuses: ["To Do", "In Progress", "On Hold", "Done"],
 					defaultStatus: "To Do",
 					// checkActiveBranches is undefined - should default to true
 				}) as BacklogConfig,

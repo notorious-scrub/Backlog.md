@@ -23,7 +23,7 @@ Running `backlog config` with no arguments launches the interactive advanced wiz
 | `defaultAssignee` | Pre-fill assignee  | `[]`                          |
 | `defaultStatus`   | First column       | `To Do`                       |
 | `definition_of_done` | Default DoD checklist items for new tasks | `(not set)` |
-| `statuses`        | Board columns      | `[To Do, In Progress, Done]`  |
+| `statuses`        | Board columns      | `[To Do, In Progress, On Hold, Done]`  |
 | `dateFormat`      | Date/time format   | `yyyy-mm-dd hh:mm`            |
 | `includeDatetimeInDates` | Add time to new dates | `true`              |
 | `defaultEditor`   | Editor for 'E' key | Platform default (nano/notepad) |

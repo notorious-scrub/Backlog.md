@@ -62,6 +62,7 @@ labels: ["bug", "frontend"]
 milestone: "v1.0"
 dependencies: ["task-0"]
 parent_task_id: "task-parent"
+summary_parent_task_id: "task-summary"
 subtasks: ["task-1.1", "task-1.2"]
 ---
 
@@ -86,6 +87,7 @@ Fix the login bug that prevents users from signing in.
 			expect(task.milestone).toBe("v1.0");
 			expect(task.dependencies).toEqual(["task-0"]);
 			expect(task.parentTaskId).toBe("task-parent");
+			expect(task.summaryParentTaskId).toBe("task-summary");
 			expect(task.subtasks).toEqual(["task-1.1", "task-1.2"]);
 			expect(task.acceptanceCriteriaItems?.map((item) => item.text)).toEqual([
 				"Login form validates correctly",
@@ -112,6 +114,7 @@ Just a basic task.`;
 			expect(task.dependencies).toEqual([]);
 			expect(task.acceptanceCriteriaItems).toEqual([]);
 			expect(task.parentTaskId).toBeUndefined();
+			expect(task.summaryParentTaskId).toBeUndefined();
 			expect(task.subtasks).toBeUndefined();
 		});
 
@@ -433,6 +436,24 @@ describe("Markdown Serializer", () => {
 			const result = serializeTask(task);
 
 			expect(result).toContain("parent_task_id: task-1");
+		});
+
+		it("should serialize task with summary parent", () => {
+			const task: Task = {
+				id: "task-2",
+				title: "Summary child",
+				status: "To Do",
+				assignee: [],
+				createdDate: "2025-06-03",
+				labels: [],
+				dependencies: [],
+				description: "A summary child task.",
+				summaryParentTaskId: "task-1",
+			};
+
+			const result = serializeTask(task);
+
+			expect(result).toContain("summary_parent_task_id: task-1");
 		});
 
 		it("should serialize minimal task", () => {

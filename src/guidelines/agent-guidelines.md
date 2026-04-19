@@ -20,6 +20,8 @@ remains fully synchronized and up-to-date.
 - ✅ **Export & Reporting**: Generate markdown reports and board snapshots
 - ✅ **Milestones**: Create, list, view, rename, archive, and attach tasks via `backlog milestone …` and task flags
 - ✅ **AI-Optimized**: `--plain` flag provides clean text output for AI processing
+- ✅ **Automation-Ready JSON**: `--json` on core task read/write flows and `search` provides stable machine-readable output
+- ✅ **Governance Validation**: `backlog validate` / `backlog lint` surfaces backlog hygiene issues with optional JSON output
 
 ### Why This Matters to You (AI Agent)
 
@@ -31,9 +33,12 @@ remains fully synchronized and up-to-date.
 
 ### Key Understanding
 
-- **Tasks** live in `backlog/tasks/` as `task-<id> - <title>.md` files
-- **You interact via CLI only**: `backlog task create`, `backlog task edit`, etc.
-- **Use `--plain` flag** for AI-friendly output when viewing/listing
+- **Tasks** live in `backlog/tasks/` as Markdown files with project-specific IDs such as `BACK-123`
+- **You interact via CLI only**: `backlog task create`, `backlog task edit`, `backlog task bulk`, `backlog milestone …`, etc.
+- **Use `--plain`** for deterministic AI-friendly output when viewing, listing, searching, or reading post-write confirmations
+- **Use `--json`** when a wrapper or automation needs stable structured output from `task create`, `task edit`, `task view`, `task list`, or `search`
+- **Use `backlog validate`** before or after large maintenance sweeps when you need backlog-health proof
+- **Use `backlog report governance …`** when you need a repeatable backlog-health answer such as missing docs, invalid labels, invalid milestones, or missing summary parents
 - **Never bypass the CLI** - It handles Git, metadata, file naming, and relationships
 
 ---
@@ -68,6 +73,8 @@ remains fully synchronized and up-to-date.
 - **All task operations MUST use the Backlog.md CLI tool**
 - This ensures metadata is correctly updated and the project stays in sync
 - **Always use `--plain` flag** when listing or viewing tasks for AI-friendly text output
+- **Use `--json`** when an agent workflow needs a stable machine-readable contract instead of parsing text
+- **Quote PowerShell `@assignee` values**, for example `-a "@codex"`
 
 ---
 
@@ -174,8 +181,12 @@ PR-style summary of what was implemented.
 | Clear Final Summary     | `backlog task edit 42 --clear-final-summary` |
 | Set milestone on task   | `backlog task edit 42 --milestone "Release 1.0"` |
 | Clear milestone on task | `backlog task edit 42 --clear-milestone` (alias: `--no-milestone`) |
+| Set summary parent      | `backlog task edit 42 --summary-parent BACK-100` |
+| Clear summary parent    | `backlog task edit 42 --clear-summary-parent` |
 | Bulk set milestone      | `backlog task milestone 42 43 --milestone "Release 1.0"` |
 | Bulk clear milestone    | `backlog task milestone 42 43 --clear` |
+| Bulk preview labels     | `backlog task bulk --select-status "To Do" --add-label governance` |
+| Bulk apply docs         | `backlog task bulk 42 43 --set-doc docs/spec.md --apply` |
 
 ---
 
@@ -210,6 +221,7 @@ Provide a concise summary of the task purpose and its goal. Explains the context
 ⚠️ **IMPORTANT: How AC Commands Work**
 
 - **Adding criteria (`--ac`)** accepts multiple flags: `--ac "First" --ac "Second"` ✅
+- **Replacing the full set** uses `--acceptance-criteria "First" --acceptance-criteria "Second"` ✅
 - **Checking/unchecking/removing** accept multiple flags too: `--check-ac 1 --check-ac 2` ✅
 - **Mixed operations** work in a single command: `--check-ac 1 --uncheck-ac 2 --remove-ac 3` ✅
 
@@ -439,12 +451,27 @@ Milestones are Markdown files under `backlog/milestones/`. Prefer **`backlog mil
 - Add: `backlog milestone add "Release 1.0" -d "Scope" --plain` or `backlog milestone add` (TTY wizard)
 - Edit description: `backlog milestone edit "Release 1.0" -d "…" --plain` or `backlog milestone edit` (wizard)
 - Rename (updates matching tasks by default): `backlog milestone rename "Old" "New" --plain`; skip task updates: `--no-update-tasks`
-- Remove (archive + task cleanup): `backlog milestone remove "Name" --tasks clear|keep|reassign` (with `--reassign-to` when using `reassign`)
-- Archive only: `backlog milestone archive m-3`
+- Remove (archive + task cleanup): `backlog milestone remove "Name" --tasks clear|keep|reassign --plain` (with `--reassign-to` when using `reassign`)
+- Archive only: `backlog milestone archive m-3 --plain`
 
 Use **`--plain`** for script- and agent-friendly output. Multi-line milestone descriptions follow the same shell rules as task description/plan/notes (see **Multi‑line Input** below).
 
-For a compact cheat sheet, see **[backlog-cli.md](backlog-cli.md)**; for the full tables, **[CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md)**.
+For a compact cheat sheet, see **[CLI-CHEATSHEET.md](CLI-CHEATSHEET.md)**; for the full tables, **[CLI-REFERENCE.md](CLI-REFERENCE.md)**.
+
+For `task edit`, keep the flag semantics straight:
+- `--label` replaces the whole label list; `--add-label` / `--remove-label` mutate it.
+- `--acceptance-criteria` replaces the whole AC list; `--ac` appends items.
+- `--notes` / `--final-summary` replace text; the matching `--append-*` flags append blocks.
+- `--parent` creates dotted subtasks; `--summary-parent` models non-blocking hierarchy without dotted IDs.
+- `task bulk` previews by default; add `--apply` only after reviewing the selected task set and planned mutations.
+
+For governance maintenance sweeps:
+- `backlog task list --missing-field documentation --plain`
+- `backlog task list --missing-summary-parent --plain`
+- `backlog task list --invalid-labels --invalid-dependencies --invalid-milestones --json`
+- `backlog report governance missing-documentation --json`
+- `backlog task bulk --select-missing-field documentation --add-doc docs/spec.md`
+- `backlog task bulk --select-milestone "Release 1.0" --set-summary-parent BACK-100 --apply`
 
 ---
 
@@ -550,6 +577,9 @@ backlog search --type task --milestone none --plain
 | Clear milestone  | `backlog task edit 42 --clear-milestone`    |
 | Bulk set milestone | `backlog task milestone 42 43 --milestone "Release 1.0"` |
 | Bulk clear milestone | `backlog task milestone 42 43 --clear`   |
+| Bulk preview labels | `backlog task bulk --select-status "To Do" --add-label governance` |
+| Bulk apply docs | `backlog task bulk 42 43 --set-doc docs/spec.md --apply` |
+| Bulk apply by query | `backlog task bulk --query "auth" --set-milestone "Release 1.0" --apply` |
 
 ### Acceptance Criteria Management
 
@@ -608,6 +638,11 @@ The CLI preserves input literally. Shells do not convert `\n` inside normal quot
   - `backlog task edit 42 --notes "$(printf 'Line1\nLine2')"`
 - PowerShell (backtick n):
   - `backlog task edit 42 --notes "Line1`nLine2"`
+
+PowerShell tips:
+- Quote values that start with `@`, such as `--assignee "@codex"`.
+- In a source checkout, `backlog` prefers the repo's `src/cli.ts` runtime, so `backlog --version` should match `package.json` when you are testing local changes.
+- Use backtick newlines for multi-line text, such as `--notes "Line1`nLine2"`.
 
 Do not expect `"...\n..."` to become a newline. That passes the literal backslash + n to the CLI by design.
 

@@ -243,6 +243,25 @@ describe("Acceptance Criteria CLI", () => {
 			expect(task?.rawContent).toContain("- [ ] #1 Must be updated");
 			expect(task?.rawContent).toContain("- [ ] #2 Must work");
 		});
+
+		it("replaces acceptance criteria with --acceptance-criteria and appends with --ac", async () => {
+			await $`bun ${CLI_PATH} task edit 1 --ac "Old criterion 1" --ac "Old criterion 2"`.cwd(TEST_DIR).quiet();
+
+			const result =
+				await $`bun ${CLI_PATH} task edit 1 --acceptance-criteria "Replacement criterion 1" --acceptance-criteria "Replacement criterion 2" --ac "Appended criterion 3"`
+					.cwd(TEST_DIR)
+					.quiet();
+			expect(result.exitCode).toBe(0);
+
+			const core = new Core(TEST_DIR);
+			const task = await core.filesystem.loadTask("task-1");
+			expect(task).not.toBeNull();
+			expect(task?.rawContent).toContain("- [ ] #1 Replacement criterion 1");
+			expect(task?.rawContent).toContain("- [ ] #2 Replacement criterion 2");
+			expect(task?.rawContent).toContain("- [ ] #3 Appended criterion 3");
+			expect(task?.rawContent).not.toContain("Old criterion 1");
+			expect(task?.rawContent).not.toContain("Old criterion 2");
+		});
 	});
 
 	describe("acceptance criteria parsing", () => {

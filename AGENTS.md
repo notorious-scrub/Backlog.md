@@ -67,17 +67,32 @@ If you can simplify the code, do it.
 - `bun run cli config get <key>` - Get a specific config value (e.g. defaultEditor)
 - `bun run cli config set <key> <value>` - Set a config value with validation
 
-### Backlog CLI: milestones
+### Backlog CLI: agent-safe workflow
 
-When working in a Backlog.md project (not this repo’s `bun run cli` dev wrapper), use the **`backlog`** command. Milestones live under `backlog/milestones/`; prefer CLI over editing those files by hand.
+When you are managing backlog records in a Backlog.md project, use the
+installed **`backlog`** command from the project root. Use this repo's
+`bun run cli` wrapper only when developing Backlog.md itself.
 
-- **Help:** `backlog milestone --help`
-- **List / inspect:** `backlog milestone list --plain` (optional `--show-completed`, `--discovery`); `backlog milestone view m-0 --plain` or `backlog milestone view "Release 1.0" --plain`
-- **Create / edit:** `backlog milestone add "…" -d "…" --plain` or `backlog milestone add` (TTY wizard); `backlog milestone edit "…" -d "…" --plain` or `backlog milestone edit` (wizard)
-- **Rename / remove / archive:** `backlog milestone rename "Old" "New" --plain` (optional `--no-update-tasks`); `backlog milestone remove "…" --tasks clear|keep|reassign` (with `--reassign-to` for `reassign`); `backlog milestone archive m-3`
-- **Tasks:** `--milestone` on `task create` / `draft create`; `task edit --milestone` / `--clear-milestone` / `--no-milestone`; bulk `task milestone <ids…> --milestone "…"` or `--clear`; list `task list -m <name|none>`; search `backlog search "…" --milestone "…" --plain`
+- **Read/search first:** `backlog task list --plain`, `backlog task view BACK-123 --plain`, `backlog search "auth" --plain`
+- **Output mode:** use `--plain` for deterministic human/agent output; use `--json` on `task create`, `task edit`, `task view`, `task list`, and `search` when a wrapper needs a stable machine-readable contract
+- **Status/ownership:** `backlog task edit BACK-123 -s "In Progress" -a "@codex" --plain`
+- **Hierarchy:** use `--parent` for dotted subtasks; use `--summary-parent` for non-blocking hierarchy and wave/summary ownership
+- **Milestones:** `backlog milestone list --plain`, `backlog milestone view m-0 --plain`, `backlog milestone add "Release 1.0" -d "Scope" --plain`, `backlog task edit BACK-123 --milestone "Release 1.0" --plain`
+- **Bulk maintenance:** `backlog task bulk --select-status "To Do" --add-label governance` previews by default; add `--apply` to persist changes
+- **Governance:** `backlog validate --json`, `backlog report governance missing-documentation --plain`, `backlog task list --missing-summary-parent --plain`
 
-Use **`--plain`** for deterministic, agent-friendly output. Short cheat sheet: [backlog-cli.md](backlog-cli.md). Full reference: [CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md).
+Task edit semantics that agents must keep straight:
+- `--label` replaces the full label set; `--add-label` / `--remove-label` mutate it
+- `--acceptance-criteria` replaces the full AC set; `--ac` appends items
+- `--notes` / `--final-summary` replace text; `--append-notes` / `--append-final-summary` append blocks
+- `--milestone` sets the task milestone; `--clear-milestone` / `--no-milestone` removes it
+
+PowerShell notes:
+- Quote values that start with `@`, for example `-a "@codex"`
+- Use PowerShell backticks for real newlines, for example `--notes "Line1`nLine2"`
+- In a source checkout, `backlog --version` should match `package.json`; the wrapper should resolve to `src/cli.ts`, not a stale packaged binary
+
+Short cheat sheet: [CLI-CHEATSHEET.md](CLI-CHEATSHEET.md). Full reference: [CLI-REFERENCE.md](CLI-REFERENCE.md).
 
 ## Core Structure
 

@@ -218,4 +218,50 @@ describe("Task edit section preservation", () => {
 		expect(result).toContain("Updated minimal description");
 		expect(result).toContain("No acceptance criteria defined");
 	});
+
+	it("preserves multiline and repeated edit arguments through array-style invocation", async () => {
+		const create = await $`bun ${[cliPath, "task", "create", "Array invocation task", "--desc", "Original body"]}`
+			.cwd(TEST_DIR)
+			.quiet();
+		expect(create.exitCode).toBe(0);
+
+		const multilineDescription = "Line 1\nLine 2\n\nLine 4";
+		const multilineNotes = "First note line\nSecond note line";
+		const multilineSummary = "Summary line 1\nSummary line 2";
+
+		const edit = await $`bun ${[
+			cliPath,
+			"task",
+			"edit",
+			"1",
+			"--description",
+			multilineDescription,
+			"--acceptance-criteria",
+			"Replacement criterion 1",
+			"--acceptance-criteria",
+			"Replacement criterion 2",
+			"--ac",
+			"Appended criterion 3",
+			"--notes",
+			multilineNotes,
+			"--final-summary",
+			multilineSummary,
+			"--plain",
+		]}`
+			.cwd(TEST_DIR)
+			.quiet();
+		expect(edit.exitCode).toBe(0);
+
+		const output = edit.stdout.toString();
+		expect(output).toContain("Line 1");
+		expect(output).toContain("Line 2");
+		expect(output).toContain("Replacement criterion 1");
+		expect(output).toContain("Replacement criterion 2");
+		expect(output).toContain("Appended criterion 3");
+		expect(output).toContain("First note line");
+		expect(output).toContain("Second note line");
+		expect(output).toContain("Summary line 1");
+		expect(output).toContain("Summary line 2");
+		expect(output).not.toContain("Original body");
+	});
 });

@@ -80,5 +80,8 @@ describe("CLI auto-plain behavior in non-TTY runs", () => {
 		const result = await $`bun ${CLI_PATH} task edit 1 -s "In Progress"`.cwd(TEST_DIR).quiet();
 		expect(result.exitCode).toBe(0);
 		expect(result.stdout.toString()).toContain("Updated task TASK-1");
+		expect(result.stdout.toString()).toContain("Task TASK-1 - First Task");
+		expect(result.stdout.toString()).toContain("Status: ◒ In Progress");
+		expect(result.stdout.toString()).toContain("File: ");
 	});
 });

@@ -45,7 +45,9 @@ interface Props {
 
 type Mode = "preview" | "edit" | "create";
 
-type TaskUpdatePayload = Partial<Task> & {
+type TaskUpdatePayload = Omit<Partial<Task>, "milestone" | "summaryParentTaskId"> & {
+  milestone?: string | null;
+  summaryParentTaskId?: string | null;
   definitionOfDoneAdd?: string[];
   definitionOfDoneRemove?: number[];
   definitionOfDoneCheck?: number[];
@@ -53,8 +55,9 @@ type TaskUpdatePayload = Partial<Task> & {
   disableDefinitionOfDoneDefaults?: boolean;
 };
 
-type InlineMetaUpdatePayload = Omit<Partial<Task>, "milestone"> & {
+type InlineMetaUpdatePayload = Omit<Partial<Task>, "milestone" | "summaryParentTaskId"> & {
   milestone?: string | null;
+  summaryParentTaskId?: string | null;
 };
 
 type TextSectionKey = "description" | "plan" | "notes" | "finalSummary";
@@ -286,12 +289,31 @@ export const TaskDetailsModal: React.FC<Props> = ({
   );
   const [isScreenshotLibraryCollapsed, setIsScreenshotLibraryCollapsed] = useState(true);
   const [milestone, setMilestone] = useState<string>(task?.milestone || "");
+  const [summaryParentTaskId, setSummaryParentTaskId] = useState<string>(task?.summaryParentTaskId || "");
   const [availableTasks, setAvailableTasks] = useState<Task[]>([]);
   const [taskAuditEvents, setTaskAuditEvents] = useState<TaskAuditEvent[]>([]);
   const [taskAuditFilter, setTaskAuditFilter] = useState<AuditEventFilter>("all");
   const [taskAuditLoading, setTaskAuditLoading] = useState(false);
   const [taskAuditError, setTaskAuditError] = useState<string | null>(null);
   const milestoneSelectionValue = resolveMilestoneToId(milestone);
+  const summaryParentOptions = useMemo(
+    () => availableTasks.filter((candidate) => candidate.id !== task?.id),
+    [availableTasks, task?.id],
+  );
+  const resolveTaskLabel = useCallback(
+    (taskId?: string | null, fallbackTitle?: string | null): string => {
+      const normalized = (taskId ?? "").trim();
+      if (!normalized) {
+        return "";
+      }
+      const match = availableTasks.find((candidate) => candidate.id === normalized);
+      if (match) {
+        return `${match.id} - ${match.title}`;
+      }
+      return fallbackTitle ? `${normalized} - ${fallbackTitle}` : normalized;
+    },
+    [availableTasks],
+  );
 
   const loadTaskAuditEvents = useCallback(async (taskId: string | undefined) => {
     if (!taskId) {
@@ -454,6 +476,7 @@ export const TaskDetailsModal: React.FC<Props> = ({
     setCollapsedTextSections(buildInitialCollapsedTextSections(task, isCreateMode));
     setIsScreenshotLibraryCollapsed(true);
     setMilestone(task?.milestone || "");
+    setSummaryParentTaskId(task?.summaryParentTaskId || "");
     setTaskAuditFilter("all");
     setMode(isCreateMode ? "create" : "preview");
     setError(null);
@@ -623,12 +646,13 @@ export const TaskDetailsModal: React.FC<Props> = ({
         dependencies,
         references,
         milestone: milestone.trim().length > 0 ? milestone.trim() : undefined,
+        summaryParentTaskId: summaryParentTaskId.trim().length > 0 ? summaryParentTaskId.trim() : undefined,
       };
 
       if (isCreateMode && onSubmit) {
         Object.assign(taskData, buildDefinitionOfDoneCreatePayload());
         // Create new task
-        await onSubmit(taskData);
+        await onSubmit(taskData as Partial<Task>);
         // Only close if successful (no error thrown)
         onClose();
       } else if (task) {
@@ -705,6 +729,9 @@ export const TaskDetailsModal: React.FC<Props> = ({
     if (updates.references !== undefined) setReferences(updates.references as string[]);
     if (updates.description !== undefined) setDescription(String(updates.description ?? ""));
     if (updates.milestone !== undefined) setMilestone((updates.milestone ?? "") as string);
+    if (updates.summaryParentTaskId !== undefined) {
+      setSummaryParentTaskId((updates.summaryParentTaskId ?? "") as string);
+    }
 
     // Only update server if editing existing task
     if (task) {
@@ -1819,6 +1846,43 @@ export const TaskDetailsModal: React.FC<Props> = ({
                 </option>
               ))}
             </select>
+          </div>
+
+          {/* Summary Parent */}
+          <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3">
+            <SectionHeader title="Summary Parent" />
+            <select
+              className={`w-full h-10 px-3 pr-10 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-stone-500 dark:focus:ring-stone-400 focus:border-transparent transition-colors duration-200 ${isFromOtherBranch ? 'opacity-60 cursor-not-allowed' : ''}`}
+              value={summaryParentTaskId}
+              onChange={(e) => {
+                const value = e.target.value;
+                setSummaryParentTaskId(value);
+                if (task) {
+                  void handleInlineMetaUpdate({ summaryParentTaskId: value.trim().length > 0 ? value : null });
+                }
+              }}
+              disabled={isFromOtherBranch}
+            >
+              <option value="">No summary parent</option>
+              {!summaryParentOptions.some((candidate) => candidate.id === summaryParentTaskId) && summaryParentTaskId ? (
+                <option value={summaryParentTaskId}>
+                  {resolveTaskLabel(summaryParentTaskId, task?.summaryParentTaskTitle)}
+                </option>
+              ) : null}
+              {summaryParentOptions.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {candidate.id} - {candidate.title}
+                </option>
+              ))}
+            </select>
+            {task?.summaryChildSummaries && task.summaryChildSummaries.length > 0 ? (
+              <div className="mt-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
+                <div className="font-semibold text-gray-800 dark:text-gray-100">Summary Children</div>
+                {task.summaryChildSummaries.map((child) => (
+                  <div key={child.id}>{child.id} - {child.title}</div>
+                ))}
+              </div>
+            ) : null}
           </div>
 
           {/* Dependencies */}

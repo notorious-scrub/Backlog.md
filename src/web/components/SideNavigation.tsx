@@ -13,7 +13,7 @@ import {
 import ErrorBoundary from './ErrorBoundary';
 import { SidebarSkeleton } from './LoadingSpinner';
 import { sanitizeUrlTitle } from '../utils/urlHelpers';
-import { getWebVersion } from '../utils/version';
+import { getWebRuntimeInfo, type WebRuntimeInfo } from '../utils/version';
 import { apiClient } from '../lib/api';
 import { splitDocumentsByLegacy } from '../utils/documents';
 
@@ -21,6 +21,15 @@ import { splitDocumentsByLegacy } from '../utils/documents';
 const stripIdPrefix = (id: string): string => {
 	// Remove any prefix pattern: letters followed by dash (task-, doc-, decision-, JIRA-, etc.)
 	return id.replace(/^[a-zA-Z]+-/, '');
+};
+
+const formatProjectRootLabel = (projectRoot: string | null): string => {
+	if (!projectRoot) {
+		return '';
+	}
+	const normalized = projectRoot.replace(/[\\/]+$/, '');
+	const segments = normalized.split(/[\\/]/).filter(Boolean);
+	return segments[segments.length - 1] || normalized;
 };
 
 // Icon components for better semantics and performance
@@ -136,6 +145,16 @@ const Icons = {
 			<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
 		</svg>
 	),
+	Governance: () => (
+		<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+			<path
+				strokeLinecap="round"
+				strokeLinejoin="round"
+				strokeWidth={2}
+				d="M12 3l7 4v5c0 4.25-2.7 7.63-7 9-4.3-1.37-7-4.75-7-9V7l7-4zm0 5v4m0 4h.01"
+			/>
+		</svg>
+	),
 	Automation: () => (
 		<svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 			<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 3.75h4.5v3h-4.5zm-4.5 7.5h13.5v4.5H5.25zm2.25 4.5v4.5h3v-4.5zm6.75 0v4.5h3v-4.5z" />
@@ -197,7 +216,7 @@ const SideNavigation = memo(function SideNavigation({
 		// Auto-collapse if more than 6 decisions
 		return decisions.length > 6;
 	});
-	const [version, setVersion] = useState<string>('');
+	const [runtimeInfo, setRuntimeInfo] = useState<WebRuntimeInfo | null>(null);
 	const location = useLocation();
 	const navigate = useNavigate();
 
@@ -216,7 +235,7 @@ const SideNavigation = memo(function SideNavigation({
 
 	// Fetch version on mount
 	useEffect(() => {
-		getWebVersion().then(setVersion).catch(() => setVersion(''));
+		getWebRuntimeInfo().then(setRuntimeInfo).catch(() => setRuntimeInfo(null));
 	}, []);
 
 	// Save docs collapse state to localStorage
@@ -567,6 +586,20 @@ const SideNavigation = memo(function SideNavigation({
 
 						{/* Statistics Navigation */}
 						<NavLink
+							to="/governance"
+							className={({ isActive }) =>
+								`flex items-center px-3 py-2 rounded-lg transition-colors duration-200 ${
+									isActive
+										? 'bg-blue-50 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 font-medium'
+										: 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
+								}`
+							}
+						>
+							<Icons.Governance />
+							<span className="ml-3 text-sm font-medium">Governance</span>
+						</NavLink>
+
+						<NavLink
 							to="/statistics"
 							className={({ isActive }) =>
 								`flex items-center px-3 py-2 rounded-lg transition-colors duration-200 ${
@@ -822,6 +855,22 @@ const SideNavigation = memo(function SideNavigation({
 						</NavLink>
 						{/* Statistics Navigation */}
 						<NavLink
+							to="/governance"
+							data-tooltip-id="sidebar-tooltip"
+							data-tooltip-content="Governance"
+							className={({ isActive }) =>
+								`flex items-center justify-center p-3 rounded-md transition-colors duration-200 ${
+									isActive
+										? 'bg-blue-50 dark:bg-blue-600/20 text-blue-700 dark:text-blue-400'
+										: 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
+								}`
+							}
+						>
+							<div className="w-6 h-6 flex items-center justify-center">
+								<Icons.Governance />
+							</div>
+						</NavLink>
+						<NavLink
 							to="/statistics"
 							data-tooltip-id="sidebar-tooltip"
 							data-tooltip-content="Statistics"
@@ -894,22 +943,41 @@ const SideNavigation = memo(function SideNavigation({
 			{/* Settings Button - Bottom Left */}
 			<div className={`border-t border-gray-200 dark:border-gray-700 ${isCollapsed ? 'px-2 py-2' : 'px-4 py-4'}`}>
 				{!isCollapsed ? (
-					<NavLink
-						to="/settings"
-						className={({ isActive }) =>
-							`flex items-center px-3 py-2 rounded-lg transition-colors duration-200 ${
-								isActive
-									? 'bg-blue-50 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 font-medium'
-									: 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
-							}`
-						}
-					>
-						<Icons.DocumentSettings />
-						<span className="ml-3 text-sm font-medium">Settings</span>
-						{version && (
-							<span className="ml-auto text-xs text-gray-500 dark:text-gray-400">Backlog.md - v{version}</span>
+					<>
+						<NavLink
+							to="/settings"
+							className={({ isActive }) =>
+								`flex items-center px-3 py-2 rounded-lg transition-colors duration-200 ${
+									isActive
+										? 'bg-blue-50 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 font-medium'
+										: 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100'
+								}`
+							}
+						>
+							<Icons.DocumentSettings />
+							<span className="ml-3 text-sm font-medium">Settings</span>
+							{runtimeInfo?.version && (
+								<span className="ml-auto text-xs text-gray-500 dark:text-gray-400">
+									Backlog.md - v{runtimeInfo.version}
+								</span>
+							)}
+						</NavLink>
+						{runtimeInfo && (
+							<div className="mt-2 px-3 text-[11px] leading-4 text-gray-500 dark:text-gray-400">
+								{runtimeInfo.version && <div>Runtime v{runtimeInfo.version}</div>}
+								{runtimeInfo.projectRoot && (
+									<div className="truncate" title={runtimeInfo.projectRoot}>
+										Source: {formatProjectRootLabel(runtimeInfo.projectRoot)}
+									</div>
+								)}
+								{runtimeInfo.capabilityMismatch && runtimeInfo.warnings.length > 0 && (
+									<div className="mt-1 text-amber-600 dark:text-amber-400">
+										{runtimeInfo.warnings[0]}
+									</div>
+								)}
+							</div>
 						)}
-					</NavLink>
+					</>
 				) : (
 					<NavLink
 						to="/settings"

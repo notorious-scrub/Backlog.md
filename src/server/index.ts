@@ -13,6 +13,7 @@ import {
 } from "../core/automated-qa.ts";
 import { Core } from "../core/backlog.ts";
 import type { ContentStore } from "../core/content-store.ts";
+import { buildGovernanceReport, isGovernanceReportId } from "../core/governance.ts";
 import { initializeProject } from "../core/init.ts";
 import type { SearchService } from "../core/search-service.ts";
 import { getTaskStatistics } from "../core/statistics.ts";
@@ -28,6 +29,7 @@ import type {
 } from "../types/index.ts";
 import { watchConfig } from "../utils/config-watcher.ts";
 import { resolveMilestoneInputFromLists } from "../utils/milestone-input.ts";
+import { attachSubtaskSummaries } from "../utils/task-subtasks.ts";
 import { getVersion } from "../utils/version.ts";
 
 // Regex pattern to match any prefix (letters followed by dash)
@@ -94,6 +96,7 @@ import indexHtml from "../web/index.html";
 
 export class BacklogServer {
 	private core: Core;
+	private readonly projectPath: string;
 	private server: Server<unknown> | null = null;
 	private projectName = "Untitled Project";
 	private sockets = new Set<ServerWebSocket<unknown>>();
@@ -104,6 +107,7 @@ export class BacklogServer {
 	private configWatcher: { stop: () => void } | null = null;
 
 	constructor(projectPath: string) {
+		this.projectPath = projectPath;
 		this.core = new Core(projectPath, { enableWatchers: true });
 	}
 
@@ -275,6 +279,7 @@ export class BacklogServer {
 					"/documentation/*": indexHtml,
 					"/decisions": indexHtml,
 					"/decisions/*": indexHtml,
+					"/governance": indexHtml,
 					"/statistics": indexHtml,
 					"/settings": indexHtml,
 					"/quick-task": indexHtml,
@@ -377,6 +382,10 @@ export class BacklogServer {
 					},
 					"/api/search": {
 						GET: async (req: Request) => await this.handleSearch(req),
+					},
+					"/api/governance/reports/:id": {
+						GET: async (req: Request & { params: { id: string } }) =>
+							await this.handleGetGovernanceReport(req.params.id),
 					},
 					"/api/screenshots": {
 						GET: async () => await this.handleListScreenshots(),
@@ -664,6 +673,7 @@ export class BacklogServer {
 		const status = url.searchParams.get("status") || undefined;
 		const assignee = url.searchParams.get("assignee") || undefined;
 		const parent = url.searchParams.get("parent") || undefined;
+		const summaryParent = url.searchParams.get("summaryParent") || undefined;
 		const priorityParam = url.searchParams.get("priority") || undefined;
 		const crossBranch = url.searchParams.get("crossBranch") === "true";
 		const labelParams = [...url.searchParams.getAll("label"), ...url.searchParams.getAll("labels")];
@@ -685,6 +695,7 @@ export class BacklogServer {
 
 		// Resolve parent task ID if provided
 		let parentTaskId: string | undefined;
+		let summaryParentTaskId: string | undefined;
 		if (parent) {
 			const store = await this.getContentStoreInstance();
 			const allTasks = store.getTasks();
@@ -704,9 +715,35 @@ export class BacklogServer {
 			parentTaskId = parentTask.id;
 		}
 
+		if (summaryParent) {
+			const store = await this.getContentStoreInstance();
+			const allTasks = store.getTasks();
+			let summaryParentTask = findTaskByLooseId(allTasks, summaryParent);
+			if (!summaryParentTask) {
+				const fallbackId = ensurePrefix(summaryParent);
+				const fallback = await this.core.filesystem.loadTask(fallbackId);
+				if (fallback) {
+					store.upsertTask(fallback);
+					summaryParentTask = fallback;
+				}
+			}
+			if (!summaryParentTask) {
+				const normalizedSummaryParent = ensurePrefix(summaryParent);
+				return Response.json({ error: `Summary parent task ${normalizedSummaryParent} not found` }, { status: 404 });
+			}
+			summaryParentTaskId = summaryParentTask.id;
+		}
+
 		// Use Core.queryTasks which handles all filtering and cross-branch logic
 		const tasks = await this.core.queryTasks({
-			filters: { status, assignee, priority, parentTaskId, labels: labels.length > 0 ? labels : undefined },
+			filters: {
+				status,
+				assignee,
+				priority,
+				parentTaskId,
+				summaryParentTaskId,
+				labels: labels.length > 0 ? labels : undefined,
+			},
 			includeCrossBranch: crossBranch,
 		});
 
@@ -794,6 +831,19 @@ export class BacklogServer {
 		}
 	}
 
+	private async handleGetGovernanceReport(reportId: string): Promise<Response> {
+		try {
+			if (!isGovernanceReportId(reportId)) {
+				return Response.json({ error: "Unknown governance report" }, { status: 404 });
+			}
+			const report = await buildGovernanceReport(this.core, reportId);
+			return Response.json(report);
+		} catch (error) {
+			console.error("Error building governance report:", error);
+			return Response.json({ error: "Failed to build governance report" }, { status: 500 });
+		}
+	}
+
 	private async handleCreateTask(req: Request): Promise<Response> {
 		const payload = await req.json();
 
@@ -831,6 +881,7 @@ export class BacklogServer {
 				dependencies: payload.dependencies,
 				references: payload.references,
 				parentTaskId: payload.parentTaskId,
+				summaryParentTaskId: payload.summaryParentTaskId,
 				implementationPlan: payload.implementationPlan,
 				implementationNotes: payload.implementationNotes,
 				finalSummary: payload.finalSummary,
@@ -854,11 +905,11 @@ export class BacklogServer {
 			const fallback = await this.core.filesystem.loadTask(fallbackId);
 			if (fallback) {
 				store.upsertTask(fallback);
-				return Response.json(fallback);
+				return Response.json(attachSubtaskSummaries(fallback, [...tasks, fallback]));
 			}
 			return Response.json({ error: "Task not found" }, { status: 404 });
 		}
-		return Response.json(task);
+		return Response.json(attachSubtaskSummaries(task, tasks));
 	}
 
 	private async handleGetTaskAuditLog(req: Request, taskId: string): Promise<Response> {
@@ -914,6 +965,13 @@ export class BacklogServer {
 			} else {
 				updateInput.milestone = updates.milestone;
 			}
+		}
+
+		if (
+			"summaryParentTaskId" in updates &&
+			(typeof updates.summaryParentTaskId === "string" || updates.summaryParentTaskId === null)
+		) {
+			updateInput.summaryParentTaskId = updates.summaryParentTaskId;
 		}
 
 		if ("labels" in updates && Array.isArray(updates.labels)) {
@@ -1662,7 +1720,25 @@ export class BacklogServer {
 	private async handleGetVersion(): Promise<Response> {
 		try {
 			const version = await getVersion();
-			return Response.json({ version });
+			const config = await this.core.filesystem.loadConfig();
+			return Response.json({
+				version,
+				project: {
+					root: this.projectPath,
+					name: config?.projectName ?? this.projectName,
+				},
+				runtime: {
+					executable: process.argv[0] ?? null,
+					entry: process.argv[1] ?? null,
+					cwd: process.cwd(),
+					platform: process.platform,
+				},
+				capabilities: {
+					runtimeMetadata: true,
+					cliJson: true,
+					validate: true,
+				},
+			});
 		} catch (error) {
 			console.error("Error getting version:", error);
 			return Response.json({ error: "Failed to get version" }, { status: 500 });

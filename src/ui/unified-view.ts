@@ -30,6 +30,7 @@ export interface UnifiedViewOptions {
 		filterDescription?: string;
 		searchQuery?: string;
 		parentTaskId?: string;
+		summaryParentTaskId?: string;
 	};
 	preloadedKanbanData?: {
 		tasks: Task[];
@@ -106,6 +107,8 @@ export async function runUnifiedView(options: UnifiedViewOptions): Promise<void>
 		if (baseTasks.length === 0) {
 			if (options.filter?.parentTaskId) {
 				console.log(`No child tasks found for parent task ${options.filter.parentTaskId}.`);
+			} else if (options.filter?.summaryParentTaskId) {
+				console.log(`No tasks found for summary parent ${options.filter.summaryParentTaskId}.`);
 			} else {
 				console.log("No tasks found.");
 			}

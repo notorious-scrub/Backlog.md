@@ -124,7 +124,7 @@ backlog browser
 
 You can switch between AI-assisted and manual workflows at any time — both operate on the same Markdown task files. It is recommended to modify tasks via Backlog.md commands (CLI/MCP/Web) rather than editing task files manually, so field types and metadata stay consistent.
 
-**Learn more:** [CLI helper](backlog-cli.md) | [CLI reference](CLI-INSTRUCTIONS.md) | [Advanced configuration](ADVANCED-CONFIG.md)
+**Learn more:** [CLI cheat sheet](CLI-CHEATSHEET.md) | [CLI reference](CLI-REFERENCE.md) | [Advanced configuration](ADVANCED-CONFIG.md)
 
 ---
 
@@ -233,10 +233,10 @@ Use `/mcp` command in your AI tool (Claude Code, Codex, Kiro) to verify if the c
 
 ## <img src="./.github/cli-reference-256.png" alt="CLI Reference" width="28" height="28" align="center"> CLI reference
 
-Full command reference — task management, search, board, docs, decisions, and more: **[CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md)**
+Full command reference — task management, search, board, docs, decisions, and more: **[CLI-REFERENCE.md](CLI-REFERENCE.md)**
 
 Need the fast path for agent sessions and everyday task updates? Start with
-**[backlog-cli.md](backlog-cli.md)**.
+**[CLI-CHEATSHEET.md](CLI-CHEATSHEET.md)**.
 
 Quick examples: `backlog task create`, `backlog task list`, `backlog task edit`, `backlog milestone add`, `backlog milestone list`, `backlog search`, `backlog board`, `backlog browser`.
 

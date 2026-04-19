@@ -105,6 +105,13 @@ export function formatTaskPlainText(task: Task, options: TaskPlainTextOptions = 
 		lines.push(`Parent: ${parentLabel}`);
 	}
 
+	if (task.summaryParentTaskId) {
+		const summaryParentLabel = task.summaryParentTaskTitle
+			? `${task.summaryParentTaskId} - ${task.summaryParentTaskTitle}`
+			: task.summaryParentTaskId;
+		lines.push(`Summary Parent: ${summaryParentLabel}`);
+	}
+
 	const subtaskSummaries = task.subtaskSummaries ?? [];
 	const subtaskCount = subtaskSummaries.length > 0 ? subtaskSummaries.length : (task.subtasks?.length ?? 0);
 	if (subtaskCount > 0) {
@@ -114,6 +121,19 @@ export function formatTaskPlainText(task: Task, options: TaskPlainTextOptions = 
 			lines.push(...subtaskLines);
 		} else {
 			lines.push(`Subtasks: ${subtaskCount}`);
+		}
+	}
+
+	const summaryChildSummaries = task.summaryChildSummaries ?? [];
+	const summaryChildCount =
+		summaryChildSummaries.length > 0 ? summaryChildSummaries.length : (task.summaryChildren?.length ?? 0);
+	if (summaryChildCount > 0) {
+		const summaryChildLines = formatSubtaskLines(summaryChildSummaries);
+		if (summaryChildLines.length > 0) {
+			lines.push(`Summary Children (${summaryChildCount}):`);
+			lines.push(...summaryChildLines);
+		} else {
+			lines.push(`Summary Children: ${summaryChildCount}`);
 		}
 	}
 

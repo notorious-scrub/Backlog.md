@@ -43,8 +43,13 @@ export function normalizeTaskId(taskId: string, prefix: string = DEFAULT_TASK_PR
 export function normalizeTaskIdentity(task: Task): Task {
 	const normalizedId = normalizeTaskId(task.id);
 	const normalizedParent = task.parentTaskId ? normalizeTaskId(task.parentTaskId) : undefined;
+	const normalizedSummaryParent = task.summaryParentTaskId ? normalizeTaskId(task.summaryParentTaskId) : undefined;
 
-	if (normalizedId === task.id && normalizedParent === task.parentTaskId) {
+	if (
+		normalizedId === task.id &&
+		normalizedParent === task.parentTaskId &&
+		normalizedSummaryParent === task.summaryParentTaskId
+	) {
 		return task;
 	}
 
@@ -52,6 +57,7 @@ export function normalizeTaskIdentity(task: Task): Task {
 		...task,
 		id: normalizedId,
 		parentTaskId: normalizedParent,
+		summaryParentTaskId: normalizedSummaryParent,
 	};
 }
 

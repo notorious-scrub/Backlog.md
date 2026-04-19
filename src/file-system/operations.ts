@@ -16,6 +16,7 @@ import type {
 	TaskAuditEventPage,
 	TaskAuditEventType,
 	TaskListFilter,
+	ValidationTaskField,
 } from "../types/index.ts";
 import { documentIdsEqual, normalizeDocumentId } from "../utils/document-id.ts";
 import {
@@ -231,6 +232,9 @@ export class FileSystem {
 			id: taskId,
 			parentTaskId: task.parentTaskId
 				? normalizeId(task.parentTaskId, extractAnyPrefix(task.parentTaskId) ?? prefix)
+				: undefined,
+			summaryParentTaskId: task.summaryParentTaskId
+				? normalizeId(task.summaryParentTaskId, extractAnyPrefix(task.summaryParentTaskId) ?? prefix)
 				: undefined,
 		};
 		const content = serializeTask(normalizedTask);
@@ -1389,6 +1393,7 @@ ${description || `Milestone: ${title}`}`,
 		const normalizedConfig: BacklogConfig = {
 			...config,
 			definitionOfDone: this.normalizeDefinitionOfDone(config.definitionOfDone),
+			validation: this.normalizeValidationConfig(config.validation),
 		};
 		const content = this.serializeConfig(normalizedConfig);
 		await Bun.write(configPath, content);
@@ -1708,6 +1713,16 @@ ${description || `Milestone: ${title}`}`,
 						}
 					}
 					break;
+				case "validation":
+					if (value.startsWith("{") && value.endsWith("}")) {
+						try {
+							const parsed = JSON.parse(value) as unknown;
+							config.validation = this.normalizeValidationConfig(parsed);
+						} catch {
+							// Ignore malformed validation config and continue parsing other fields.
+						}
+					}
+					break;
 				case "task_prefix":
 					config.prefixes = { task: value.replace(/['"]/g, "") };
 					break;
@@ -1741,6 +1756,7 @@ ${description || `Milestone: ${title}`}`,
 			onStatusChange: config.onStatusChange,
 			agentAutomations: normalizedAgentAutomations,
 			automatedQa: normalizedAutomatedQa,
+			validation: this.normalizeValidationConfig(config.validation),
 			prefixes: config.prefixes,
 		};
 	}
@@ -1790,6 +1806,7 @@ ${description || `Milestone: ${title}`}`,
 				? [`agent_automations: ${JSON.stringify(normalizedAgentAutomations)}`]
 				: []),
 			...(automatedQaCompatibility ? [`automated_qa: ${JSON.stringify(automatedQaCompatibility)}`] : []),
+			...(config.validation ? [`validation: ${JSON.stringify(config.validation)}`] : []),
 			...(config.prefixes?.task ? [`task_prefix: "${config.prefixes.task}"`] : []),
 		];
 
@@ -1805,6 +1822,42 @@ ${description || `Milestone: ${title}`}`,
 			.filter((item): item is string => typeof item === "string")
 			.map((item) => item.trim())
 			.filter((item) => item.length > 0);
+	}
+
+	private normalizeValidationConfig(validation: unknown): BacklogConfig["validation"] {
+		if (!validation || typeof validation !== "object") {
+			return undefined;
+		}
+
+		const parsed = validation as { requiredTaskFields?: unknown };
+		const supportedFields: ValidationTaskField[] = [
+			"description",
+			"documentation",
+			"assignee",
+			"labels",
+			"milestone",
+			"priority",
+			"implementationPlan",
+			"implementationNotes",
+			"finalSummary",
+			"acceptanceCriteria",
+			"definitionOfDone",
+		];
+		const requiredTaskFields = Array.isArray(parsed.requiredTaskFields)
+			? parsed.requiredTaskFields
+					.filter((field): field is string => typeof field === "string")
+					.map((field) => field.trim())
+					.filter(
+						(field): field is ValidationTaskField =>
+							field.length > 0 && supportedFields.includes(field as ValidationTaskField),
+					)
+			: [];
+
+		if (requiredTaskFields.length === 0) {
+			return undefined;
+		}
+
+		return { requiredTaskFields };
 	}
 
 	private normalizeAgentAutomations(

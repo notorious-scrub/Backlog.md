@@ -122,6 +122,31 @@ describe("CLI milestone and task milestone", () => {
 		expect(edit.stderr.toString()).toContain('Milestone not found: "Missing"');
 	});
 
+	it("accepts --plain across milestone mutation commands", async () => {
+		const add = await $`bun ${cliPath} milestone add "Release A" -d "Scope" --plain`.cwd(TEST_DIR).quiet();
+		expect(add.exitCode).toBe(0);
+		expect(add.stdout.toString()).toContain('Created milestone "Release A" (m-0).');
+
+		const edit = await $`bun ${cliPath} milestone edit "Release A" -d "Updated scope" --plain`.cwd(TEST_DIR).quiet();
+		expect(edit.exitCode).toBe(0);
+		expect(edit.stdout.toString()).toContain('Updated milestone "Release A" (m-0) description.');
+
+		await $`bun ${cliPath} task create "Ship it" --milestone "Release A"`.cwd(TEST_DIR).quiet();
+
+		const rename = await $`bun ${cliPath} milestone rename "Release A" "Release B" --plain`.cwd(TEST_DIR).quiet();
+		expect(rename.exitCode).toBe(0);
+		expect(rename.stdout.toString()).toContain('Renamed milestone "Release A" (m-0) → "Release B" (m-0).');
+
+		const remove = await $`bun ${cliPath} milestone remove "Release B" --tasks keep --plain`.cwd(TEST_DIR).quiet();
+		expect(remove.exitCode).toBe(0);
+		expect(remove.stdout.toString()).toContain('Removed milestone "Release B" (m-0).');
+
+		await $`bun ${cliPath} milestone add "Release C" --plain`.cwd(TEST_DIR).quiet();
+		const archive = await $`bun ${cliPath} milestone archive "Release C" --plain`.cwd(TEST_DIR).quiet();
+		expect(archive.exitCode).toBe(0);
+		expect(archive.stdout.toString()).toContain('Archived milestone "Release C" (m-1).');
+	});
+
 	it("bulk updates milestones for multiple tasks", async () => {
 		await $`bun ${cliPath} milestone add "Release A"`.cwd(TEST_DIR).quiet();
 		await $`bun ${cliPath} milestone add "Release B"`.cwd(TEST_DIR).quiet();

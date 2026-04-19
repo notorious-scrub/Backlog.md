@@ -93,7 +93,7 @@ In a Backlog.md project directory, use the **`backlog`** CLI (installed as `back
 
 Multi-line milestone descriptions use the same shell rules as task `--desc` / `--plan` / `--notes` (see **CLI Multi-line Input** below). Prefer **`--plain`** for automation.
 
-Quick reference: [backlog-cli.md](backlog-cli.md) · Full tables: [CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md).
+Quick reference: [CLI-CHEATSHEET.md](CLI-CHEATSHEET.md) · Full tables: [CLI-REFERENCE.md](CLI-REFERENCE.md).
 
 ## Core Structure
 - **CLI Tool**: Built with Bun and TypeScript as a global npm package (`npm i -g backlog.md`)

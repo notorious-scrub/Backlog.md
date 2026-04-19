@@ -10,6 +10,7 @@ import AgentOrchestration from './components/AgentOrchestration';
 import Settings from './components/Settings';
 import Statistics from './components/Statistics';
 import MilestonesPage from './components/MilestonesPage';
+import GovernancePage from './components/GovernancePage';
 import TaskDetailsModal from './components/TaskDetailsModal';
 import QuickTaskWindow from './components/QuickTaskWindow';
 import InitializationScreen from './components/InitializationScreen';
@@ -599,6 +600,7 @@ function App() {
             <Route path="decisions" element={<DecisionDetail decisions={decisions} onRefreshData={refreshData} />} />
             <Route path="decisions/:id" element={<DecisionDetail decisions={decisions} onRefreshData={refreshData} />} />
             <Route path="decisions/:id/:title" element={<DecisionDetail decisions={decisions} onRefreshData={refreshData} />} />
+            <Route path="governance" element={<GovernancePage />} />
             <Route path="statistics" element={<Statistics tasks={tasks} isLoading={isLoading} onEditTask={handleEditTask} projectName={projectName} />} />
             <Route path="agent-orchestration" element={<AgentOrchestration />} />
             <Route path="settings/agent-orchestration" element={<Navigate to="/agent-orchestration" replace />} />

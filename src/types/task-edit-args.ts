@@ -4,6 +4,7 @@ export interface TaskEditArgs {
 	status?: string;
 	priority?: "high" | "medium" | "low";
 	milestone?: string | null;
+	summaryParentTaskId?: string | null;
 	labels?: string[];
 	addLabels?: string[];
 	removeLabels?: string[];

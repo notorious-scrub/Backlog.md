@@ -73,7 +73,7 @@ In a Backlog.md project, use the **`backlog`** command for milestones (files und
 - **Rename / remove / archive:** `backlog milestone rename "Old" "New" --plain` (optional `--no-update-tasks`); `backlog milestone remove "…" --tasks clear|keep|reassign` (`--reassign-to` with `reassign`); `backlog milestone archive m-3`
 - **Link tasks:** `task create/edit` with `--milestone` or `--clear-milestone`; bulk `task milestone <ids…> --milestone "…"` or `--clear`; filter `task list -m …`; search `--milestone` on `backlog search`
 
-Use **`--plain`** for scripts and agents. See [backlog-cli.md](backlog-cli.md) and [CLI-INSTRUCTIONS.md](CLI-INSTRUCTIONS.md).
+Use **`--plain`** for scripts and agents. See [CLI-CHEATSHEET.md](CLI-CHEATSHEET.md) and [CLI-REFERENCE.md](CLI-REFERENCE.md).
 
 ## Core Structure
 

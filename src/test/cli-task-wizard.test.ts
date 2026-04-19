@@ -45,6 +45,7 @@ describe("CLI task wizard integration compatibility", () => {
 		await $`bun ${CLI_PATH} task create "Edit target" --desc "Before edit"`.cwd(TEST_DIR).quiet();
 		const result = await $`bun ${CLI_PATH} task edit 1`.cwd(TEST_DIR).quiet().nothrow();
 		expect(result.exitCode).toBe(0);
-		expect(result.stdout.toString()).toContain("Updated task");
+		expect(result.stdout.toString()).toContain("No changes made to task");
+		expect(result.stdout.toString()).toContain("Task TASK-1 - Edit target");
 	});
 });

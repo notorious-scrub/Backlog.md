@@ -49,6 +49,10 @@ export interface Task {
 	parentTaskTitle?: string;
 	subtasks?: string[];
 	subtaskSummaries?: Array<{ id: string; title: string }>;
+	summaryParentTaskId?: string;
+	summaryParentTaskTitle?: string;
+	summaryChildren?: string[];
+	summaryChildSummaries?: Array<{ id: string; title: string }>;
 	priority?: "high" | "medium" | "low";
 	branch?: string;
 	ordinal?: number;
@@ -97,6 +101,7 @@ export interface TaskCreateInput {
 	references?: string[];
 	documentation?: string[];
 	parentTaskId?: string;
+	summaryParentTaskId?: string;
 	implementationPlan?: string;
 	implementationNotes?: string;
 	finalSummary?: string;
@@ -126,6 +131,7 @@ export interface TaskUpdateInput {
 	documentation?: string[];
 	addDocumentation?: string[];
 	removeDocumentation?: string[];
+	summaryParentTaskId?: string | null;
 	implementationPlan?: string;
 	appendImplementationPlan?: string[];
 	clearImplementationPlan?: boolean;
@@ -206,11 +212,36 @@ export interface TaskListFilter {
 	assignee?: string;
 	priority?: "high" | "medium" | "low";
 	parentTaskId?: string;
+	summaryParentTaskId?: string;
 	labels?: string[];
 	/** Canonical milestone id (after resolving user input against milestone files). */
 	milestoneId?: string;
 	/** When true, only tasks with no milestone set. */
 	withoutMilestone?: boolean;
+}
+
+export type GovernanceReportId =
+	| "missing-documentation"
+	| "invalid-labels"
+	| "invalid-dependencies"
+	| "invalid-milestones"
+	| "missing-summary-parent";
+
+export interface GovernanceReportFinding {
+	taskId: string;
+	taskTitle: string;
+	summary: string;
+	details: string[];
+	task: Task;
+}
+
+export interface GovernanceReport {
+	id: GovernanceReportId;
+	title: string;
+	description: string;
+	taskCount: number;
+	generatedAt: string;
+	findings: GovernanceReportFinding[];
 }
 
 export interface Decision {
@@ -412,6 +443,23 @@ export interface AutomatedQaRunRecord {
 	finalTaskStatus?: string;
 }
 
+export type ValidationTaskField =
+	| "description"
+	| "documentation"
+	| "assignee"
+	| "labels"
+	| "milestone"
+	| "priority"
+	| "implementationPlan"
+	| "implementationNotes"
+	| "finalSummary"
+	| "acceptanceCriteria"
+	| "definitionOfDone";
+
+export interface ValidationConfig {
+	requiredTaskFields?: ValidationTaskField[];
+}
+
 export interface BacklogConfig {
 	projectName: string;
 	defaultAssignee?: string;
@@ -440,6 +488,7 @@ export interface BacklogConfig {
 	onStatusChange?: string;
 	agentAutomations?: AgentAutomationConfig[];
 	automatedQa?: AutomatedQaConfig;
+	validation?: ValidationConfig;
 	/** ID prefix configuration for tasks and drafts. Defaults to { task: "task", draft: "draft" } */
 	prefixes?: PrefixConfig;
 	mcp?: {

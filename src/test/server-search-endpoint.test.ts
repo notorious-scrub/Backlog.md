@@ -136,6 +136,31 @@ describe("BacklogServer search endpoint", () => {
 		expect(tasks[0]?.id).toBe(baseTask.id);
 	});
 
+	it("filters task listings by summary parent and returns hierarchy metadata", async () => {
+		const createResponse = await fetch(`http://127.0.0.1:${serverPort}/api/tasks`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				title: "Summary child via API",
+				status: "To Do",
+				summaryParentTaskId: baseTask.id,
+			}),
+		});
+		expect(createResponse.ok).toBe(true);
+		const created = (await createResponse.json()) as Task;
+		expect(created.summaryParentTaskId).toBe(baseTask.id);
+
+		const filtered = await fetchJson<Task[]>(`/api/tasks?summaryParent=${baseTask.id}`);
+		expect(filtered.map((task) => task.id)).toEqual([created.id]);
+		expect(filtered[0]?.summaryParentTaskId).toBe(baseTask.id);
+
+		const fetchedParent = await fetchJson<Task>(`/api/task/${baseTask.id}`);
+		expect(fetchedParent.summaryChildren).toContain(created.id);
+		expect(fetchedParent.summaryChildSummaries).toEqual(
+			expect.arrayContaining([{ id: created.id, title: "Summary child via API" }]),
+		);
+	});
+
 	it("rejects unsupported priority filters with 400", async () => {
 		await expect(fetchJson<Task[]>("/api/tasks?priority=urgent")).rejects.toThrow();
 	});

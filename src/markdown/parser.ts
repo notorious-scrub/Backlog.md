@@ -187,6 +187,7 @@ export function parseTask(content: string): Task {
 		implementationNotes: notesSection,
 		finalSummary: finalSummarySection,
 		parentTaskId: frontmatter.parent_task_id ? String(frontmatter.parent_task_id) : undefined,
+		summaryParentTaskId: frontmatter.summary_parent_task_id ? String(frontmatter.summary_parent_task_id) : undefined,
 		subtasks: Array.isArray(frontmatter.subtasks) ? frontmatter.subtasks.map(String) : undefined,
 		priority: validatedPriority,
 		ordinal: frontmatter.ordinal !== undefined ? Number(frontmatter.ordinal) : undefined,

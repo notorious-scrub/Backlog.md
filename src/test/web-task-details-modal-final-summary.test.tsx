@@ -199,4 +199,30 @@ describe("Web task popup Final Summary display", () => {
 		expect(html).toContain('option value="m-0"');
 		expect(html).not.toContain('option value="m-2" selected');
 	});
+
+	it("renders summary parent controls and summary children in the modal", () => {
+		setupDom();
+
+		const task: Task = {
+			id: "TASK-10",
+			title: "Wave summary",
+			status: "To Do",
+			assignee: [],
+			createdDate: "2025-01-01",
+			labels: [],
+			dependencies: [],
+			summaryChildSummaries: [{ id: "TASK-11", title: "Wave child" }],
+		};
+
+		const html = renderToString(
+			<ThemeProvider>
+				<TaskDetailsModal task={task} isOpen={true} onClose={() => {}} />
+			</ThemeProvider>,
+		);
+
+		expect(html).toContain("Summary Parent");
+		expect(html).toContain("Summary Children");
+		expect(html).toContain("TASK-11");
+		expect(html).toContain("Wave child");
+	});
 });

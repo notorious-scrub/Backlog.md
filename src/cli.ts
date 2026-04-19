@@ -22,6 +22,7 @@ import {
 	ensureWorkerLock,
 	resetAutomatedQaActiveState,
 } from "./core/automated-qa.ts";
+import { buildGovernanceReport, isGovernanceReportId, taskMatchesMissingField } from "./core/governance.ts";
 import { initializeProject } from "./core/init.ts";
 import {
 	addMilestoneForProject,
@@ -34,6 +35,8 @@ import {
 } from "./core/milestone-mutations.ts";
 import { buildMilestoneBuckets, collectArchivedMilestoneKeys, milestoneKey } from "./core/milestones.ts";
 import { computeSequences } from "./core/sequences.ts";
+import { type ValidationReport, validateBacklogProject } from "./core/validation.ts";
+import { serializeSearchResultsForCli, serializeTaskForCli } from "./formatters/cli-json.ts";
 import { formatTaskPlainText } from "./formatters/task-plain-text.ts";
 import {
 	type AgentInstructionFile,
@@ -53,6 +56,7 @@ import {
 	type Decision,
 	type DecisionSearchResult,
 	type DocumentSearchResult,
+	type GovernanceReport,
 	isLocalEditableTask,
 	type Milestone,
 	type SearchPriorityFilter,
@@ -62,6 +66,8 @@ import {
 	type TaskCreateInput,
 	type TaskListFilter,
 	type TaskSearchResult,
+	type TaskUpdateInput,
+	type ValidationTaskField,
 } from "./types/index.ts";
 import type { TaskEditArgs } from "./types/task-edit-args.ts";
 import { genericSelectList } from "./ui/components/generic-list.ts";
@@ -195,6 +201,506 @@ function printMissingRequiredOption(optionSpec: string): void {
 	process.exitCode = 1;
 }
 
+function buildTaskPlainSnapshot(task: Task): string {
+	return formatTaskPlainText(task, task.filePath ? { filePathOverride: task.filePath } : {});
+}
+
+function printTaskEditResult(previousTask: Task, updatedTask: Task): void {
+	const previousSnapshot = buildTaskPlainSnapshot(previousTask);
+	const updatedSnapshot = buildTaskPlainSnapshot(updatedTask);
+	const changed = previousSnapshot !== updatedSnapshot;
+
+	console.log(changed ? `Updated task ${updatedTask.id}` : `No changes made to task ${updatedTask.id}`);
+	console.log("");
+	console.log(updatedSnapshot);
+}
+
+function isJsonRequested(options?: { json?: boolean }): boolean {
+	return Boolean(options?.json || process.argv.includes("--json"));
+}
+
+function validateOutputFlags(options?: { plain?: boolean; json?: boolean }): boolean {
+	const explicitPlain = Boolean(options?.plain || process.argv.includes("--plain"));
+	const explicitJson = Boolean(options?.json || process.argv.includes("--json"));
+	if (explicitPlain && explicitJson) {
+		console.error("Use either --plain or --json, not both.");
+		process.exitCode = 1;
+		return false;
+	}
+	return true;
+}
+
+function printJson(value: unknown): void {
+	console.log(JSON.stringify(value, null, 2));
+}
+
+function printValidationReport(report: ValidationReport): void {
+	if (report.valid) {
+		console.log(`Validation passed. Checked ${report.taskCount} task${report.taskCount === 1 ? "" : "s"}.`);
+		return;
+	}
+
+	console.log(
+		`Validation failed with ${report.issueCount} issue${report.issueCount === 1 ? "" : "s"} across ${report.taskCount} task${report.taskCount === 1 ? "" : "s"}.\n`,
+	);
+	for (const issue of report.issues) {
+		console.log(`- ${issue.taskId} [${issue.rule}] ${issue.message}`);
+	}
+}
+
+function printGovernanceReport(report: GovernanceReport): void {
+	console.log(`${report.title}: ${report.taskCount} task${report.taskCount === 1 ? "" : "s"}.\n`);
+	if (report.findings.length === 0) {
+		console.log("No matching tasks.");
+		return;
+	}
+	for (const finding of report.findings) {
+		console.log(`- ${finding.taskId} ${finding.summary}`);
+		for (const detail of finding.details) {
+			if (detail === finding.summary) {
+				continue;
+			}
+			console.log(`  ${detail}`);
+		}
+	}
+}
+
+type BulkTaskSelectorOptions = {
+	query?: string;
+	selectStatus?: string;
+	selectAssignee?: string;
+	selectParent?: string;
+	selectSummaryParent?: string;
+	selectMilestone?: string;
+	selectPriority?: string;
+	selectMissingField?: string;
+	selectMissingSummaryParent?: boolean;
+	selectInvalidLabels?: boolean;
+	selectInvalidDependencies?: boolean;
+	selectInvalidMilestones?: boolean;
+};
+
+type ResolvedBulkTaskSelection = {
+	tasks: Task[];
+	missingTaskIds: string[];
+	selectorLines: string[];
+};
+
+function formatTaskIdList(taskIds: string[], limit = 20): string {
+	if (taskIds.length === 0) {
+		return "";
+	}
+	const shown = taskIds.slice(0, limit);
+	const suffix = taskIds.length > limit ? ` (and ${taskIds.length - limit} more)` : "";
+	return `${shown.join(", ")}${suffix}`;
+}
+
+function formatTaskSelectionList(tasks: Task[], limit = 20): string {
+	if (tasks.length === 0) {
+		return "  (none)";
+	}
+	const shown = tasks.slice(0, limit).map((task) => `  - ${task.id} - ${task.title}`);
+	if (tasks.length > limit) {
+		shown.push(`  - ... and ${tasks.length - limit} more`);
+	}
+	return shown.join("\n");
+}
+
+function parsePriorityOptionValue(
+	raw: string | undefined,
+): { value: "high" | "medium" | "low" } | { error: string } | null {
+	if (raw === undefined) {
+		return null;
+	}
+	const priority = raw.toLowerCase();
+	const validPriorities = ["high", "medium", "low"] as const;
+	if (!validPriorities.includes(priority as (typeof validPriorities)[number])) {
+		return { error: `Invalid priority: ${raw}. Valid values are: high, medium, low` };
+	}
+	return { value: priority as "high" | "medium" | "low" };
+}
+
+function buildBulkTaskUpdateSummaryLines(options: {
+	status?: string;
+	milestone?: string | null;
+	summaryParentTaskId?: string | null;
+	setLabels?: string[];
+	addLabels?: string[];
+	removeLabels?: string[];
+	setDocumentation?: string[];
+	addDocumentation?: string[];
+	removeDocumentation?: string[];
+	setReferences?: string[];
+	addReferences?: string[];
+	removeReferences?: string[];
+	setNotes?: string;
+	appendNotes?: string[];
+	clearNotes?: boolean;
+}): string[] {
+	const lines: string[] = [];
+	if (options.status) {
+		lines.push(`Set status: ${options.status}`);
+	}
+	if (options.milestone === null) {
+		lines.push("Clear milestone");
+	} else if (options.milestone) {
+		lines.push(`Set milestone: ${options.milestone}`);
+	}
+	if (options.summaryParentTaskId === null) {
+		lines.push("Clear summary parent");
+	} else if (options.summaryParentTaskId) {
+		lines.push(`Set summary parent: ${options.summaryParentTaskId}`);
+	}
+	if (options.setLabels && options.setLabels.length > 0) {
+		lines.push(`Set labels: ${options.setLabels.join(", ")}`);
+	}
+	if (options.addLabels && options.addLabels.length > 0) {
+		lines.push(`Add labels: ${options.addLabels.join(", ")}`);
+	}
+	if (options.removeLabels && options.removeLabels.length > 0) {
+		lines.push(`Remove labels: ${options.removeLabels.join(", ")}`);
+	}
+	if (options.setDocumentation && options.setDocumentation.length > 0) {
+		lines.push(`Set documentation: ${options.setDocumentation.join(", ")}`);
+	}
+	if (options.addDocumentation && options.addDocumentation.length > 0) {
+		lines.push(`Add documentation: ${options.addDocumentation.join(", ")}`);
+	}
+	if (options.removeDocumentation && options.removeDocumentation.length > 0) {
+		lines.push(`Remove documentation: ${options.removeDocumentation.join(", ")}`);
+	}
+	if (options.setReferences && options.setReferences.length > 0) {
+		lines.push(`Set references: ${options.setReferences.join(", ")}`);
+	}
+	if (options.addReferences && options.addReferences.length > 0) {
+		lines.push(`Add references: ${options.addReferences.join(", ")}`);
+	}
+	if (options.removeReferences && options.removeReferences.length > 0) {
+		lines.push(`Remove references: ${options.removeReferences.join(", ")}`);
+	}
+	if (typeof options.setNotes === "string") {
+		lines.push("Replace implementation notes");
+	}
+	if (options.appendNotes && options.appendNotes.length > 0) {
+		lines.push(`Append implementation notes (${options.appendNotes.length})`);
+	}
+	if (options.clearNotes) {
+		lines.push("Clear implementation notes");
+	}
+	return lines;
+}
+
+async function resolveBulkTaskSelection(
+	core: Core,
+	explicitTaskIds: string[],
+	options: BulkTaskSelectorOptions,
+): Promise<ResolvedBulkTaskSelection> {
+	const normalizedExplicitIds = Array.from(
+		new Set(explicitTaskIds.map((taskId) => normalizeTaskId(String(taskId || "").trim())).filter(Boolean)),
+	);
+	const hasFilterSelection =
+		typeof options.query === "string" ||
+		typeof options.selectStatus === "string" ||
+		typeof options.selectAssignee === "string" ||
+		typeof options.selectParent === "string" ||
+		typeof options.selectSummaryParent === "string" ||
+		typeof options.selectMilestone === "string" ||
+		typeof options.selectPriority === "string" ||
+		typeof options.selectMissingField === "string" ||
+		Boolean(options.selectMissingSummaryParent) ||
+		Boolean(options.selectInvalidLabels) ||
+		Boolean(options.selectInvalidDependencies) ||
+		Boolean(options.selectInvalidMilestones);
+
+	if (normalizedExplicitIds.length > 0 && hasFilterSelection) {
+		throw new Error("Select tasks either by explicit task IDs or by --select-* / --query filters, not both.");
+	}
+	if (normalizedExplicitIds.length === 0 && !hasFilterSelection) {
+		throw new Error("Select at least one task with explicit IDs or --select-* / --query filters.");
+	}
+
+	const allLocalTasks = await core.queryTasks({ includeCrossBranch: false });
+	if (normalizedExplicitIds.length > 0) {
+		const matches: Task[] = [];
+		const missingTaskIds: string[] = [];
+		for (const taskId of normalizedExplicitIds) {
+			const matchedTask = allLocalTasks.find((task) => taskIdsEqual(task.id, taskId));
+			if (!matchedTask || !isLocalEditableTask(matchedTask)) {
+				missingTaskIds.push(taskId);
+				continue;
+			}
+			matches.push(matchedTask);
+		}
+		return {
+			tasks: sortTasks(matches, "priority"),
+			missingTaskIds: missingTaskIds.sort((left, right) => left.localeCompare(right)),
+			selectorLines: [`Explicit task IDs: ${formatTaskIdList(normalizedExplicitIds)}`],
+		};
+	}
+
+	const filters: TaskListFilter = {};
+	const selectorLines: string[] = [];
+	if (options.selectStatus) {
+		filters.status = options.selectStatus;
+		selectorLines.push(`Status: ${options.selectStatus}`);
+	}
+	if (options.selectAssignee) {
+		filters.assignee = options.selectAssignee;
+		selectorLines.push(`Assignee: ${options.selectAssignee}`);
+	}
+	const priorityResult = parsePriorityOptionValue(options.selectPriority);
+	if (priorityResult && "error" in priorityResult) {
+		throw new Error(priorityResult.error);
+	}
+	if (priorityResult && "value" in priorityResult) {
+		filters.priority = priorityResult.value;
+		selectorLines.push(`Priority: ${priorityResult.value}`);
+	}
+	if (options.selectMilestone !== undefined) {
+		const rawMilestone = String(options.selectMilestone).trim().toLowerCase();
+		if (!rawMilestone || rawMilestone === "none" || rawMilestone === "__none") {
+			filters.withoutMilestone = true;
+			selectorLines.push("Milestone: none");
+		} else {
+			filters.milestoneId = await resolveMilestoneForCli(core, String(options.selectMilestone));
+			selectorLines.push(`Milestone: ${filters.milestoneId}`);
+		}
+	}
+
+	let tasks = await core.queryTasks({
+		query: options.query?.trim() ? options.query.trim() : undefined,
+		filters,
+		includeCrossBranch: false,
+	});
+	if (options.query?.trim()) {
+		selectorLines.push(`Query: ${options.query.trim()}`);
+	}
+
+	const missingField = parseValidationField(
+		options.selectMissingField ? String(options.selectMissingField) : undefined,
+	);
+	if (options.selectMissingField && !missingField) {
+		throw new Error(
+			`Unsupported field '${String(options.selectMissingField)}'. Use one of: ${GOVERNANCE_FIELD_OPTIONS.join(", ")}`,
+		);
+	}
+
+	let parentId: string | undefined;
+	if (options.selectParent) {
+		parentId = normalizeTaskId(String(options.selectParent));
+		const parentTaskId = parentId;
+		if (!allLocalTasks.some((task) => taskIdsEqual(parentTaskId, task.id))) {
+			throw new Error(`Parent task ${parentId} not found.`);
+		}
+		tasks = tasks.filter((task) => task.parentTaskId && taskIdsEqual(parentTaskId, task.parentTaskId));
+		selectorLines.push(`Parent task: ${parentId}`);
+	}
+
+	let summaryParentId: string | undefined;
+	if (options.selectSummaryParent) {
+		summaryParentId = normalizeTaskId(String(options.selectSummaryParent));
+		const summaryParentTaskId = summaryParentId;
+		if (!allLocalTasks.some((task) => taskIdsEqual(summaryParentTaskId, task.id))) {
+			throw new Error(`Summary parent task ${summaryParentId} not found.`);
+		}
+		tasks = tasks.filter(
+			(task) => task.summaryParentTaskId && taskIdsEqual(summaryParentTaskId, task.summaryParentTaskId),
+		);
+		selectorLines.push(`Summary parent: ${summaryParentId}`);
+	}
+
+	if (missingField) {
+		tasks = tasks.filter((task) => taskMatchesMissingField(task, missingField));
+		selectorLines.push(`Missing field: ${missingField}`);
+	}
+	if (options.selectMissingSummaryParent) {
+		tasks = tasks.filter((task) => Boolean(task.milestone?.trim()) && !task.summaryParentTaskId);
+		selectorLines.push("Missing summary parent");
+	}
+
+	const requiresValidation =
+		Boolean(options.selectInvalidLabels) ||
+		Boolean(options.selectInvalidDependencies) ||
+		Boolean(options.selectInvalidMilestones);
+	if (requiresValidation) {
+		const validationReport = await validateBacklogProject(core);
+		if (options.selectInvalidLabels) {
+			const invalidLabelTaskIds = new Set(
+				validationReport.issues
+					.filter((issue) => issue.rule === "invalid_label")
+					.map((issue) => normalizeTaskId(issue.taskId)),
+			);
+			tasks = tasks.filter((task) => invalidLabelTaskIds.has(normalizeTaskId(task.id)));
+			selectorLines.push("Invalid labels");
+		}
+		if (options.selectInvalidDependencies) {
+			const invalidDependencyTaskIds = new Set(
+				validationReport.issues
+					.filter((issue) => issue.rule === "invalid_dependency")
+					.map((issue) => normalizeTaskId(issue.taskId)),
+			);
+			tasks = tasks.filter((task) => invalidDependencyTaskIds.has(normalizeTaskId(task.id)));
+			selectorLines.push("Invalid dependencies");
+		}
+		if (options.selectInvalidMilestones) {
+			const invalidMilestoneTaskIds = new Set(
+				validationReport.issues
+					.filter((issue) => issue.rule === "invalid_milestone")
+					.map((issue) => normalizeTaskId(issue.taskId)),
+			);
+			tasks = tasks.filter((task) => invalidMilestoneTaskIds.has(normalizeTaskId(task.id)));
+			selectorLines.push("Invalid milestones");
+		}
+	}
+
+	return {
+		tasks: sortTasks(tasks, "priority"),
+		missingTaskIds: [],
+		selectorLines,
+	};
+}
+
+function buildBulkTaskPreviewReport(params: {
+	mode: "preview" | "apply";
+	selection: ResolvedBulkTaskSelection;
+	changeLines: string[];
+}): string {
+	const lines = [
+		`Bulk task update (${params.mode})`,
+		"",
+		"Selection:",
+		...(params.selection.selectorLines.length > 0
+			? params.selection.selectorLines.map((line) => `  - ${line}`)
+			: ["  - (none)"]),
+		`  - Matched local tasks: ${params.selection.tasks.length}`,
+	];
+	if (params.selection.missingTaskIds.length > 0) {
+		lines.push(`  - Missing or non-local IDs: ${formatTaskIdList(params.selection.missingTaskIds)}`);
+	}
+	lines.push("", "Planned changes:");
+	lines.push(...params.changeLines.map((line) => `  - ${line}`));
+	lines.push("", "Matched tasks:");
+	lines.push(formatTaskSelectionList(params.selection.tasks));
+	return lines.join("\n");
+}
+
+async function rollbackBulkTaskEdits(core: Core, previousTasks: Map<string, Task>): Promise<string[]> {
+	const failedTaskIds: string[] = [];
+	for (const task of previousTasks.values()) {
+		try {
+			await core.updateTask(task, false);
+		} catch {
+			failedTaskIds.push(task.id);
+		}
+	}
+	return failedTaskIds.sort((left, right) => left.localeCompare(right));
+}
+
+async function applyBulkTaskEdits(
+	core: Core,
+	tasks: Task[],
+	updateInput: TaskUpdateInput,
+	changeSummary: string[],
+	missingTaskIds: string[],
+): Promise<string> {
+	const changedTasks: Task[] = [];
+	const unchangedTasks: Task[] = [];
+	const changedPaths = new Set<string>();
+	const originalTasks = new Map<string, Task>();
+
+	try {
+		for (const task of tasks) {
+			const original = await core.loadTaskById(task.id);
+			if (!original) {
+				continue;
+			}
+			const originalSnapshot = buildTaskPlainSnapshot(original);
+			const updated = await core.editTask(task.id, updateInput, false);
+			const updatedSnapshot = buildTaskPlainSnapshot(updated);
+			if (originalSnapshot === updatedSnapshot) {
+				unchangedTasks.push(updated);
+				continue;
+			}
+			originalTasks.set(task.id, original);
+			changedTasks.push(updated);
+			if (updated.filePath) {
+				changedPaths.add(updated.filePath);
+			} else if (original.filePath) {
+				changedPaths.add(original.filePath);
+			}
+		}
+	} catch (error) {
+		const rollbackFailures = await rollbackBulkTaskEdits(core, originalTasks);
+		const detailSuffix =
+			rollbackFailures.length > 0 ? ` (failed rollback for: ${formatTaskIdList(rollbackFailures)})` : "";
+		throw new Error(`${error instanceof Error ? error.message : String(error)}${detailSuffix}`);
+	}
+
+	if (changedPaths.size > 0 && (await core.shouldAutoCommit())) {
+		const filePaths = Array.from(changedPaths);
+		for (const filePath of filePaths) {
+			await core.git.addFile(filePath);
+		}
+		try {
+			await core.git.commitFiles(`backlog: Bulk update ${changedTasks.length} tasks`, filePaths);
+		} catch (error) {
+			await core.git.resetPaths(filePaths);
+			const rollbackFailures = await rollbackBulkTaskEdits(core, originalTasks);
+			const detailSuffix =
+				rollbackFailures.length > 0 ? ` (failed rollback for: ${formatTaskIdList(rollbackFailures)})` : "";
+			throw new Error(
+				`${error instanceof Error ? error.message : String(error)} while finalizing bulk task update${detailSuffix}`,
+			);
+		}
+	}
+
+	const lines = [
+		`Applied bulk task update to ${changedTasks.length} local task${changedTasks.length === 1 ? "" : "s"}.`,
+		"",
+		"Changes:",
+		...changeSummary.map((line) => `  - ${line}`),
+	];
+	if (changedTasks.length > 0) {
+		lines.push(
+			"",
+			`Changed: ${formatTaskIdList(changedTasks.map((task) => task.id).sort((left, right) => left.localeCompare(right)))}`,
+		);
+	}
+	if (unchangedTasks.length > 0) {
+		lines.push(
+			`Unchanged: ${formatTaskIdList(unchangedTasks.map((task) => task.id).sort((left, right) => left.localeCompare(right)))}`,
+		);
+	}
+	if (missingTaskIds.length > 0) {
+		lines.push(`Skipped unknown or non-local IDs: ${formatTaskIdList(missingTaskIds)}`);
+	}
+	return lines.join("\n");
+}
+
+const GOVERNANCE_FIELD_OPTIONS: ValidationTaskField[] = [
+	"description",
+	"documentation",
+	"assignee",
+	"labels",
+	"milestone",
+	"priority",
+	"implementationPlan",
+	"implementationNotes",
+	"finalSummary",
+	"acceptanceCriteria",
+	"definitionOfDone",
+];
+
+function parseValidationField(raw: string | undefined): ValidationTaskField | null {
+	if (!raw) {
+		return null;
+	}
+	const normalized = raw.trim();
+	return GOVERNANCE_FIELD_OPTIONS.includes(normalized as ValidationTaskField)
+		? (normalized as ValidationTaskField)
+		: null;
+}
+
 function hasCreateFieldFlags(options: Record<string, unknown>): boolean {
 	return Boolean(
 		options.description !== undefined ||
@@ -204,6 +710,7 @@ function hasCreateFieldFlags(options: Record<string, unknown>): boolean {
 			options.labels !== undefined ||
 			options.priority !== undefined ||
 			options.plain ||
+			options.json ||
 			options.ac !== undefined ||
 			options.acceptanceCriteria !== undefined ||
 			options.dod !== undefined ||
@@ -213,6 +720,7 @@ function hasCreateFieldFlags(options: Record<string, unknown>): boolean {
 			options.finalSummary !== undefined ||
 			options.draft ||
 			options.parent !== undefined ||
+			options.summaryParent !== undefined ||
 			options.dependsOn !== undefined ||
 			options.dep !== undefined ||
 			options.ref !== undefined ||
@@ -232,6 +740,7 @@ function hasEditFieldFlags(options: Record<string, unknown>): boolean {
 			options.priority !== undefined ||
 			options.ordinal !== undefined ||
 			options.plain ||
+			options.json ||
 			options.addLabel !== undefined ||
 			options.removeLabel !== undefined ||
 			options.ac !== undefined ||
@@ -254,6 +763,8 @@ function hasEditFieldFlags(options: Record<string, unknown>): boolean {
 			options.ref !== undefined ||
 			options.doc !== undefined ||
 			options.milestone !== undefined ||
+			options.summaryParent !== undefined ||
+			options.clearSummaryParent ||
 			options.clearMilestone ||
 			options.noMilestone,
 	);
@@ -1177,6 +1688,8 @@ function normalizeDependencies(dependencies: unknown): string[] {
 function buildTaskCreateInputFromOptions(title: string, options: Record<string, unknown>): TaskCreateInput {
 	const parentInput = options.parent ? String(options.parent) : undefined;
 	const normalizedParent = parentInput ? normalizeTaskId(parentInput) : undefined;
+	const summaryParentInput = options.summaryParent ? String(options.summaryParent) : undefined;
+	const normalizedSummaryParent = summaryParentInput ? normalizeTaskId(summaryParentInput) : undefined;
 	const dependencies = normalizeDependencies(options.dependsOn || options.dep);
 	const references =
 		normalizeStringList(
@@ -1232,6 +1745,7 @@ function buildTaskCreateInputFromOptions(title: string, options: Record<string, 
 		...(documentation.length > 0 ? { documentation } : {}),
 		...(options.description || options.desc ? { description: String(options.description || options.desc) } : {}),
 		...(normalizedParent && { parentTaskId: normalizedParent }),
+		...(normalizedSummaryParent && { summaryParentTaskId: normalizedSummaryParent }),
 		...(validatedPriority && { priority: validatedPriority }),
 		...(criteria.length > 0 ? { acceptanceCriteria: criteria } : {}),
 		...(definitionOfDoneAdd.length > 0 ? { definitionOfDoneAdd } : {}),
@@ -1256,6 +1770,7 @@ taskCmd
 	.option("-l, --labels <labels>")
 	.option("--priority <priority>", "set task priority (high, medium, low)")
 	.option("--plain", "use plain text output after creating")
+	.option("--json", "use structured JSON output after creating")
 	.option("--ac <criteria>", "add acceptance criteria (can be used multiple times)", createMultiValueAccumulator())
 	.option(
 		"--acceptance-criteria <criteria>",
@@ -1270,6 +1785,7 @@ taskCmd
 	.option("--milestone <name>", "attach to a milestone (id, m-N, or title)")
 	.option("--draft")
 	.option("-p, --parent <taskId>", "specify parent task ID")
+	.option("--summary-parent <taskId>", "associate the task to a summary parent without creating a dotted subtask")
 	.option(
 		"--depends-on <taskIds>",
 		"specify task dependencies (comma-separated or use multiple times)",
@@ -1295,6 +1811,9 @@ taskCmd
 		},
 	)
 	.action(async (title: string | undefined, options) => {
+		if (!validateOutputFlags(options)) {
+			return;
+		}
 		const shouldUseWizard = hasInteractiveTTY && title === undefined && !hasCreateFieldFlags(options);
 		if (!shouldUseWizard && (title === undefined || title.trim().length === 0)) {
 			printMissingRequiredArgument("title");
@@ -1327,6 +1846,7 @@ taskCmd
 
 		const createAsDraft = Boolean(options.draft);
 		const usePlainOutput = isPlainRequested(options);
+		const useJsonOutput = isJsonRequested(options);
 		const createInput = buildTaskCreateInputFromOptions(title ?? "", options);
 		if (createAsDraft) {
 			createInput.status = "Draft";
@@ -1337,6 +1857,16 @@ taskCmd
 
 		try {
 			const { task, filePath } = await core.createTaskFromInput(createInput);
+			if (useJsonOutput) {
+				printJson({
+					ok: true,
+					command: "task.create",
+					entity: createAsDraft ? "draft" : "task",
+					path: filePath ?? task.filePath ?? null,
+					task: serializeTaskForCli(task, { filePathOverride: filePath ?? null }),
+				});
+				return;
+			}
 			if (usePlainOutput) {
 				console.log(formatTaskPlainText(task, { filePathOverride: filePath }));
 				return;
@@ -1363,7 +1893,11 @@ program
 	)
 	.option("--limit <number>", "limit total results returned")
 	.option("--plain", "print plain text output instead of interactive UI")
+	.option("--json", "print structured JSON output")
 	.action(async (query: string | undefined, options) => {
+		if (!validateOutputFlags(options)) {
+			return;
+		}
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
 		await core.ensureConfigLoaded();
@@ -1441,6 +1975,32 @@ program
 			filters,
 		});
 
+		if (isJsonRequested(options)) {
+			const serializedResults = serializeSearchResultsForCli(searchResults);
+			printJson({
+				ok: true,
+				command: "search",
+				query: query ?? "",
+				filters: {
+					types,
+					status: filters.status ?? null,
+					priority: filters.priority ?? null,
+					milestone: filters.milestone ?? null,
+					withoutMilestone: filters.withoutMilestone ?? false,
+				},
+				limit: limit ?? null,
+				total: serializedResults.length,
+				counts: {
+					tasks: serializedResults.filter((result) => result.type === "task").length,
+					documents: serializedResults.filter((result) => result.type === "document").length,
+					decisions: serializedResults.filter((result) => result.type === "decision").length,
+				},
+				results: serializedResults,
+			});
+			cleanup();
+			return;
+		}
+
 		const usePlainOutput = isPlainRequested(options) || shouldAutoPlain;
 		if (usePlainOutput) {
 			printSearchResults(searchResults);
@@ -1487,6 +2047,52 @@ program
 			},
 		});
 		cleanup();
+	});
+
+const reportCmd = program.command("report").description("run named governance and backlog health reports");
+
+reportCmd
+	.command("governance <name>")
+	.description("run a repeatable governance report")
+	.option("--plain", "print human-readable output")
+	.option("--json", "print structured JSON output")
+	.action(async (name: string, options: { plain?: boolean; json?: boolean }) => {
+		if (!validateOutputFlags(options)) {
+			return;
+		}
+		if (!isGovernanceReportId(name)) {
+			console.error(
+				`Unknown governance report '${name}'. Use one of: missing-documentation, invalid-labels, invalid-dependencies, invalid-milestones, missing-summary-parent`,
+			);
+			process.exitCode = 1;
+			return;
+		}
+
+		const cwd = await requireProjectRoot();
+		const core = new Core(cwd);
+		await core.ensureConfigLoaded();
+		const cleanup = () => {
+			core.disposeSearchService();
+			core.disposeContentStore();
+		};
+
+		try {
+			const report = await buildGovernanceReport(core, name);
+			if (isJsonRequested(options)) {
+				printJson({
+					ok: true,
+					command: "report.governance",
+					report,
+				});
+			} else {
+				printGovernanceReport(report);
+			}
+		} catch (error) {
+			console.error(error instanceof Error ? error.message : String(error));
+			process.exitCode = 1;
+		} finally {
+			cleanup();
+		}
 	});
 
 function buildSearchFilterDescription(filters: {
@@ -1589,6 +2195,34 @@ function formatScore(score: number | null): string {
 	return ` [score ${invertedScore.toFixed(3)}]`;
 }
 
+function buildOrderedTaskGroups(tasks: Task[], configuredStatuses: string[]): Array<{ status: string; tasks: Task[] }> {
+	const canonicalByLower = new Map<string, string>();
+	for (const status of configuredStatuses) {
+		canonicalByLower.set(status.toLowerCase(), status);
+	}
+
+	const groups = new Map<string, Task[]>();
+	for (const task of tasks) {
+		const rawStatus = (task.status || "").trim();
+		const canonicalStatus = canonicalByLower.get(rawStatus.toLowerCase()) || rawStatus;
+		const list = groups.get(canonicalStatus) || [];
+		list.push(task);
+		groups.set(canonicalStatus, list);
+	}
+
+	const orderedStatuses = [
+		...configuredStatuses.filter((status) => groups.has(status)),
+		...Array.from(groups.keys()).filter((status) => !configuredStatuses.includes(status)),
+	];
+
+	return orderedStatuses
+		.map((status) => {
+			const list = groups.get(status);
+			return list ? { status, tasks: list } : null;
+		})
+		.filter((group): group is { status: string; tasks: Task[] } => group !== null);
+}
+
 function isTaskSearchResult(result: SearchResult): result is TaskSearchResult {
 	return result.type === "task";
 }
@@ -1599,6 +2233,12 @@ taskCmd
 	.option("-s, --status <status>", "filter tasks by status (case-insensitive)")
 	.option("-a, --assignee <assignee>", "filter tasks by assignee")
 	.option("-p, --parent <taskId>", "filter tasks by parent task ID")
+	.option("--summary-parent <taskId>", "filter tasks by summary parent task ID")
+	.option("--missing-field <field>", "filter tasks missing a field required for governance work")
+	.option("--missing-summary-parent", "filter milestone tasks missing a modeled summary parent")
+	.option("--invalid-labels", "filter tasks with labels not declared in config.labels")
+	.option("--invalid-dependencies", "filter tasks with unresolved dependencies")
+	.option("--invalid-milestones", "filter tasks with unresolved milestone references")
 	.option(
 		"-m, --milestone <name>",
 		'filter tasks by milestone (id, m-N, or title); use "none" for tasks with no milestone',
@@ -1606,7 +2246,11 @@ taskCmd
 	.option("--priority <priority>", "filter tasks by priority (high, medium, low)")
 	.option("--sort <field>", "sort tasks by field (priority, id)")
 	.option("--plain", "use plain text output instead of interactive UI")
+	.option("--json", "use structured JSON output")
 	.action(async (options) => {
+		if (!validateOutputFlags(options)) {
+			return;
+		}
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
 		await core.ensureConfigLoaded();
@@ -1640,6 +2284,13 @@ taskCmd
 			baseFilters.parentTaskId = parentInput;
 		}
 
+		let summaryParentId: string | undefined;
+		if (options.summaryParent) {
+			const summaryParentInput = String(options.summaryParent);
+			summaryParentId = normalizeTaskId(summaryParentInput);
+			baseFilters.summaryParentTaskId = summaryParentInput;
+		}
+
 		if (options.milestone !== undefined) {
 			const raw = String(options.milestone).trim().toLowerCase();
 			if (!raw || raw === "none" || raw === "__none") {
@@ -1660,17 +2311,52 @@ taskCmd
 			}
 		}
 
+		const useJsonOutput = isJsonRequested(options);
 		const usePlainOutput = isPlainRequested(options) || shouldAutoPlain;
-		if (usePlainOutput) {
+		if (usePlainOutput || useJsonOutput) {
 			const tasks = await core.queryTasks({ filters: baseFilters, includeCrossBranch: false });
+			const allLocalTasks = await core.queryTasks({ includeCrossBranch: false });
 			const config = await core.filesystem.loadConfig();
+			const missingField = parseValidationField(options.missingField ? String(options.missingField) : undefined);
+			if (options.missingField && !missingField) {
+				console.error(
+					`Unsupported field '${String(options.missingField)}'. Use one of: ${GOVERNANCE_FIELD_OPTIONS.join(", ")}`,
+				);
+				process.exitCode = 1;
+				cleanup();
+				return;
+			}
+			const requiresValidation =
+				Boolean(options.invalidLabels) || Boolean(options.invalidDependencies) || Boolean(options.invalidMilestones);
+			const validationReport = requiresValidation ? await validateBacklogProject(core) : null;
+			const invalidLabelTaskIds = new Set(
+				(validationReport?.issues ?? []).filter((issue) => issue.rule === "invalid_label").map((issue) => issue.taskId),
+			);
+			const invalidDependencyTaskIds = new Set(
+				(validationReport?.issues ?? [])
+					.filter((issue) => issue.rule === "invalid_dependency")
+					.map((issue) => issue.taskId),
+			);
+			const invalidMilestoneTaskIds = new Set(
+				(validationReport?.issues ?? [])
+					.filter((issue) => issue.rule === "invalid_milestone")
+					.map((issue) => issue.taskId),
+			);
 
 			if (parentId) {
-				const parentExists = (await core.queryTasks({ includeCrossBranch: false })).some((task) =>
-					taskIdsEqual(parentId, task.id),
-				);
+				const parentExists = allLocalTasks.some((task) => taskIdsEqual(parentId, task.id));
 				if (!parentExists) {
 					console.error(`Parent task ${parentId} not found.`);
+					process.exitCode = 1;
+					cleanup();
+					return;
+				}
+			}
+
+			if (summaryParentId) {
+				const summaryParentExists = allLocalTasks.some((task) => taskIdsEqual(summaryParentId, task.id));
+				if (!summaryParentExists) {
+					console.error(`Summary parent task ${summaryParentId} not found.`);
 					process.exitCode = 1;
 					cleanup();
 					return;
@@ -1696,11 +2382,77 @@ taskCmd
 			if (parentId) {
 				filtered = filtered.filter((task) => task.parentTaskId && taskIdsEqual(parentId, task.parentTaskId));
 			}
+			if (summaryParentId) {
+				filtered = filtered.filter(
+					(task) => task.summaryParentTaskId && taskIdsEqual(summaryParentId, task.summaryParentTaskId),
+				);
+			}
+			if (missingField) {
+				filtered = filtered.filter((task) => taskMatchesMissingField(task, missingField));
+			}
+			if (options.missingSummaryParent) {
+				filtered = filtered.filter((task) => Boolean(task.milestone?.trim()) && !task.summaryParentTaskId);
+			}
+			if (options.invalidLabels) {
+				filtered = filtered.filter((task) => invalidLabelTaskIds.has(task.id));
+			}
+			if (options.invalidDependencies) {
+				filtered = filtered.filter((task) => invalidDependencyTaskIds.has(task.id));
+			}
+			if (options.invalidMilestones) {
+				filtered = filtered.filter((task) => invalidMilestoneTaskIds.has(task.id));
+			}
+
+			if (useJsonOutput) {
+				const configuredStatuses = config?.statuses || [];
+				const groups = buildOrderedTaskGroups(filtered, configuredStatuses).map((group) => ({
+					status: group.status || "No Status",
+					count: group.tasks.length,
+					tasks: group.tasks.map((task) => serializeTaskForCli(task)),
+				}));
+				printJson({
+					ok: true,
+					command: "task.list",
+					filters: {
+						status: options.status ?? null,
+						assignee: options.assignee ?? null,
+						parentTaskId: parentId ?? null,
+						summaryParentTaskId: summaryParentId ?? null,
+						missingField: missingField ?? null,
+						missingSummaryParent: Boolean(options.missingSummaryParent),
+						invalidLabels: Boolean(options.invalidLabels),
+						invalidDependencies: Boolean(options.invalidDependencies),
+						invalidMilestones: Boolean(options.invalidMilestones),
+						milestone: baseFilters.milestoneId ?? null,
+						withoutMilestone: baseFilters.withoutMilestone ?? false,
+						priority: baseFilters.priority ?? null,
+					},
+					sort: options.sort ? String(options.sort).toLowerCase() : "priority",
+					total: filtered.length,
+					groups,
+					tasks: filtered.map((task) => serializeTaskForCli(task)),
+				});
+				cleanup();
+				return;
+			}
 
 			if (filtered.length === 0) {
 				if (options.parent) {
 					const canonicalParent = normalizeTaskId(String(options.parent));
 					console.log(`No child tasks found for parent task ${canonicalParent}.`);
+				} else if (options.summaryParent) {
+					const canonicalSummaryParent = normalizeTaskId(String(options.summaryParent));
+					console.log(`No tasks found for summary parent ${canonicalSummaryParent}.`);
+				} else if (missingField) {
+					console.log(`No tasks found missing ${missingField}.`);
+				} else if (options.missingSummaryParent) {
+					console.log("No milestone tasks are missing a summary parent.");
+				} else if (options.invalidLabels) {
+					console.log("No tasks found with invalid labels.");
+				} else if (options.invalidDependencies) {
+					console.log("No tasks found with invalid dependencies.");
+				} else if (options.invalidMilestones) {
+					console.log("No tasks found with invalid milestones.");
 				} else {
 					console.log("No tasks found.");
 				}
@@ -1720,34 +2472,13 @@ taskCmd
 				return;
 			}
 
-			const canonicalByLower = new Map<string, string>();
 			const statuses = config?.statuses || [];
-			for (const status of statuses) {
-				canonicalByLower.set(status.toLowerCase(), status);
-			}
-
-			const groups = new Map<string, Task[]>();
-			for (const task of filtered) {
-				const rawStatus = (task.status || "").trim();
-				const canonicalStatus = canonicalByLower.get(rawStatus.toLowerCase()) || rawStatus;
-				const list = groups.get(canonicalStatus) || [];
-				list.push(task);
-				groups.set(canonicalStatus, list);
-			}
-
-			const orderedStatuses = [
-				...statuses.filter((status) => groups.has(status)),
-				...Array.from(groups.keys()).filter((status) => !statuses.includes(status)),
-			];
-
-			for (const status of orderedStatuses) {
-				const list = groups.get(status);
-				if (!list) continue;
-				let sortedList = list;
+			for (const group of buildOrderedTaskGroups(filtered, statuses)) {
+				let sortedList = group.tasks;
 				if (options.sort) {
-					sortedList = sortTasks(list, options.sort.toLowerCase());
+					sortedList = sortTasks(group.tasks, options.sort.toLowerCase());
 				}
-				console.log(`${status || "No Status"}:`);
+				console.log(`${group.status || "No Status"}:`);
 				sortedList.forEach((task) => {
 					const priorityIndicator = task.priority ? `[${task.priority.toUpperCase()}] ` : "";
 					console.log(`  ${priorityIndicator}${task.id} - ${task.title}`);
@@ -1765,6 +2496,24 @@ taskCmd
 		if (options.assignee) activeFilters.push(`Assignee: ${options.assignee}`);
 		if (options.parent) {
 			activeFilters.push(`Parent: ${normalizeTaskId(String(options.parent))}`);
+		}
+		if (options.summaryParent) {
+			activeFilters.push(`Summary Parent: ${normalizeTaskId(String(options.summaryParent))}`);
+		}
+		if (options.missingField) {
+			activeFilters.push(`Missing: ${String(options.missingField)}`);
+		}
+		if (options.missingSummaryParent) {
+			activeFilters.push("Missing summary parent");
+		}
+		if (options.invalidLabels) {
+			activeFilters.push("Invalid labels");
+		}
+		if (options.invalidDependencies) {
+			activeFilters.push("Invalid dependencies");
+		}
+		if (options.invalidMilestones) {
+			activeFilters.push("Invalid milestones");
 		}
 		if (options.priority) activeFilters.push(`Priority: ${options.priority}`);
 		if (options.milestone !== undefined) {
@@ -1800,13 +2549,45 @@ taskCmd
 				updateProgress("Applying filters...");
 				const [tasks, allTasksForParentCheck] = await Promise.all([
 					core.queryTasks({ filters: baseFilters }),
-					parentId ? core.queryTasks() : Promise.resolve(undefined),
+					parentId || summaryParentId ? core.queryTasks() : Promise.resolve(undefined),
 				]);
+				const missingField = parseValidationField(options.missingField ? String(options.missingField) : undefined);
+				if (options.missingField && !missingField) {
+					throw new Error(
+						`Unsupported field '${String(options.missingField)}'. Use one of: ${GOVERNANCE_FIELD_OPTIONS.join(", ")}`,
+					);
+				}
+				const requiresValidation =
+					Boolean(options.invalidLabels) || Boolean(options.invalidDependencies) || Boolean(options.invalidMilestones);
+				const validationReport = requiresValidation ? await validateBacklogProject(core) : null;
+				const invalidLabelTaskIds = new Set(
+					(validationReport?.issues ?? [])
+						.filter((issue) => issue.rule === "invalid_label")
+						.map((issue) => issue.taskId),
+				);
+				const invalidDependencyTaskIds = new Set(
+					(validationReport?.issues ?? [])
+						.filter((issue) => issue.rule === "invalid_dependency")
+						.map((issue) => issue.taskId),
+				);
+				const invalidMilestoneTaskIds = new Set(
+					(validationReport?.issues ?? [])
+						.filter((issue) => issue.rule === "invalid_milestone")
+						.map((issue) => issue.taskId),
+				);
 
-				if (parentId && allTasksForParentCheck) {
-					const parentExists = allTasksForParentCheck.some((task) => taskIdsEqual(parentId, task.id));
-					if (!parentExists) {
-						throw new Error(`Parent task ${parentId} not found.`);
+				if (allTasksForParentCheck) {
+					if (parentId) {
+						const parentExists = allTasksForParentCheck.some((task) => taskIdsEqual(parentId, task.id));
+						if (!parentExists) {
+							throw new Error(`Parent task ${parentId} not found.`);
+						}
+					}
+					if (summaryParentId) {
+						const summaryParentExists = allTasksForParentCheck.some((task) => taskIdsEqual(summaryParentId, task.id));
+						if (!summaryParentExists) {
+							throw new Error(`Summary parent task ${summaryParentId} not found.`);
+						}
 					}
 				}
 
@@ -1826,6 +2607,26 @@ taskCmd
 				if (parentId) {
 					filtered = filtered.filter((task) => task.parentTaskId && taskIdsEqual(parentId, task.parentTaskId));
 				}
+				if (summaryParentId) {
+					filtered = filtered.filter(
+						(task) => task.summaryParentTaskId && taskIdsEqual(summaryParentId, task.summaryParentTaskId),
+					);
+				}
+				if (missingField) {
+					filtered = filtered.filter((task) => taskMatchesMissingField(task, missingField));
+				}
+				if (options.missingSummaryParent) {
+					filtered = filtered.filter((task) => Boolean(task.milestone?.trim()) && !task.summaryParentTaskId);
+				}
+				if (options.invalidLabels) {
+					filtered = filtered.filter((task) => invalidLabelTaskIds.has(task.id));
+				}
+				if (options.invalidDependencies) {
+					filtered = filtered.filter((task) => invalidDependencyTaskIds.has(task.id));
+				}
+				if (options.invalidMilestones) {
+					filtered = filtered.filter((task) => invalidMilestoneTaskIds.has(task.id));
+				}
 
 				return {
 					tasks: filtered,
@@ -1840,6 +2641,7 @@ taskCmd
 				title,
 				filterDescription,
 				parentTaskId: parentId,
+				summaryParentTaskId: summaryParentId,
 			},
 		});
 		cleanup();
@@ -1860,6 +2662,7 @@ taskCmd
 	.option("--priority <priority>", "set task priority (high, medium, low)")
 	.option("--ordinal <number>", "set task ordinal for custom ordering")
 	.option("--plain", "use plain text output after editing")
+	.option("--json", "use structured JSON output after editing")
 	.option("--add-label <label>")
 	.option("--remove-label <label>")
 	.option("--ac <criteria>", "add acceptance criteria (can be used multiple times)", createMultiValueAccumulator())
@@ -1894,7 +2697,11 @@ taskCmd
 		"uncheck Definition of Done item by index (1-based, can be used multiple times)",
 		createMultiValueAccumulator(),
 	)
-	.option("--acceptance-criteria <criteria>", "set acceptance criteria (comma-separated or use multiple times)")
+	.option(
+		"--acceptance-criteria <criteria>",
+		"replace acceptance criteria (can be used multiple times)",
+		createMultiValueAccumulator(),
+	)
 	.option("--plan <text>", "set implementation plan")
 	.option("--notes <text>", "set implementation notes (replaces existing)")
 	.option("--final-summary <text>", "set final summary (replaces existing)")
@@ -1930,9 +2737,14 @@ taskCmd
 		return [...soFar, value];
 	})
 	.option("--milestone <name>", "set milestone (id, m-N, or title)")
+	.option("--summary-parent <taskId>", "set the summary parent task ID")
+	.option("--clear-summary-parent", "remove the summary parent relationship")
 	.option("--clear-milestone", "remove milestone from the task")
 	.option("--no-milestone", "same as --clear-milestone")
 	.action(async (taskId: string | undefined, options) => {
+		if (!validateOutputFlags(options)) {
+			return;
+		}
 		const shouldUseWizard = hasInteractiveTTY && !hasEditFieldFlags(options);
 		if (!shouldUseWizard && !taskId) {
 			printMissingRequiredArgument("taskId");
@@ -1977,7 +2789,7 @@ taskCmd
 
 			try {
 				const updatedTask = await core.editTask(existingTaskForWizard.id, wizardInput);
-				console.log(`Updated task ${updatedTask.id}`);
+				printTaskEditResult(existingTaskForWizard, updatedTask);
 			} catch (error) {
 				console.error(error instanceof Error ? error.message : String(error));
 				process.exitCode = 1;
@@ -2080,7 +2892,12 @@ taskCmd
 		const addLabelValues = parseCommaSeparated(options.addLabel);
 		const removeLabelValues = parseCommaSeparated(options.removeLabel);
 		const assigneeValues = parseCommaSeparated(options.assignee);
-		const acceptanceAdditions = processAcceptanceCriteriaOptions(options);
+		const acceptanceSetValues = toStringArray(options.acceptanceCriteria)
+			.map((value) => String(value).trim())
+			.filter((value) => value.length > 0);
+		const acceptanceAdditions = toStringArray(options.ac)
+			.map((value) => String(value).trim())
+			.filter((value) => value.length > 0);
 		const definitionOfDoneAdditions = toStringArray(options.dod)
 			.map((value) => String(value).trim())
 			.filter((value) => value.length > 0);
@@ -2171,6 +2988,9 @@ taskCmd
 		if (options.clearFinalSummary) {
 			editArgs.finalSummaryClear = true;
 		}
+		if (acceptanceSetValues.length > 0) {
+			editArgs.acceptanceCriteriaSet = acceptanceSetValues;
+		}
 		if (acceptanceAdditions.length > 0) {
 			editArgs.acceptanceCriteriaAdd = acceptanceAdditions;
 		}
@@ -2208,6 +3028,17 @@ taskCmd
 			editArgs.milestone = await resolveMilestoneForCli(core, String(options.milestone));
 		}
 
+		if (options.clearSummaryParent && options.summaryParent !== undefined) {
+			console.error("Use either --clear-summary-parent or --summary-parent, not both.");
+			process.exitCode = 1;
+			return;
+		}
+		if (options.clearSummaryParent) {
+			editArgs.summaryParentTaskId = null;
+		} else if (options.summaryParent !== undefined) {
+			editArgs.summaryParentTaskId = normalizeTaskId(String(options.summaryParent));
+		}
+
 		let updatedTask: Task;
 		try {
 			const updateInput = buildTaskUpdateInput(editArgs);
@@ -2219,12 +3050,25 @@ taskCmd
 		}
 
 		const usePlainOutput = isPlainRequested(options);
+		const useJsonOutput = isJsonRequested(options);
+		if (useJsonOutput) {
+			const previousSnapshot = buildTaskPlainSnapshot(existingTask);
+			const updatedSnapshot = buildTaskPlainSnapshot(updatedTask);
+			printJson({
+				ok: true,
+				command: "task.edit",
+				changed: previousSnapshot !== updatedSnapshot,
+				path: updatedTask.filePath ?? null,
+				task: serializeTaskForCli(updatedTask),
+			});
+			return;
+		}
 		if (usePlainOutput) {
 			console.log(formatTaskPlainText(updatedTask));
 			return;
 		}
 
-		console.log(`Updated task ${updatedTask.id}`);
+		printTaskEditResult(existingTask, updatedTask);
 	});
 
 // Note: Implementation notes appending is handled via `task edit --append-notes` only.
@@ -2262,10 +3106,257 @@ taskCmd
 	});
 
 taskCmd
+	.command("bulk [taskIds...]")
+	.description("preview or apply bulk metadata updates over explicit IDs or filtered local task sets")
+	.option("--query <text>", "select tasks by search query")
+	.option("--select-status <status>", "select tasks by current status")
+	.option("--select-assignee <assignee>", "select tasks by current assignee")
+	.option("--select-parent <taskId>", "select tasks by parent task ID")
+	.option("--select-summary-parent <taskId>", "select tasks by summary parent task ID")
+	.option(
+		"--select-milestone <name>",
+		'select tasks by current milestone (id, m-N, or title); use "none" for tasks with no milestone',
+	)
+	.option("--select-priority <priority>", "select tasks by current priority (high, medium, low)")
+	.option("--select-missing-field <field>", "select tasks missing a governance field")
+	.option("--select-missing-summary-parent", "select milestone tasks missing a summary parent")
+	.option("--select-invalid-labels", "select tasks with labels not declared in config.labels")
+	.option("--select-invalid-dependencies", "select tasks with unresolved dependencies")
+	.option("--select-invalid-milestones", "select tasks with unresolved milestone references")
+	.option("--set-status <status>", "set status for all selected tasks")
+	.option("--set-milestone <name>", "set milestone for all selected tasks")
+	.option("--clear-milestone", "clear milestone for all selected tasks")
+	.option("--set-summary-parent <taskId>", "set summary parent for all selected tasks")
+	.option("--clear-summary-parent", "clear summary parent for all selected tasks")
+	.option("--set-labels <labels>", "set labels for all selected tasks (comma-separated)")
+	.option("--add-label <label>", "add one or more labels (can be used multiple times)")
+	.option("--remove-label <label>", "remove one or more labels (can be used multiple times)")
+	.option("--set-doc <documentation>", "set documentation entries (can be used multiple times)")
+	.option("--add-doc <documentation>", "add documentation entries (can be used multiple times)")
+	.option("--remove-doc <documentation>", "remove documentation entries (can be used multiple times)")
+	.option("--set-ref <reference>", "set references (can be used multiple times)")
+	.option("--add-ref <reference>", "add references (can be used multiple times)")
+	.option("--remove-ref <reference>", "remove references (can be used multiple times)")
+	.option("--set-notes <text>", 'set implementation notes (multi-line PowerShell: "Line1`nLine2")')
+	.option("--append-notes <text>", "append implementation notes (can be used multiple times)")
+	.option("--clear-notes", "clear implementation notes")
+	.option("--apply", "apply the bulk update after previewing the match set")
+	.option("--preview", "print the match set and planned changes without writing")
+	.action(async (taskIds: string[] | undefined, options) => {
+		const useApply = Boolean(options.apply);
+		const usePreview = Boolean(options.preview);
+		if (useApply && usePreview) {
+			console.error("Use either --preview or --apply, not both.");
+			process.exitCode = 1;
+			return;
+		}
+
+		const parseCommaSeparated = (value: unknown): string[] => {
+			return toStringArray(value)
+				.flatMap((entry) => String(entry).split(","))
+				.map((entry) => entry.trim())
+				.filter((entry) => entry.length > 0);
+		};
+
+		const selectorTaskIds = taskIds ?? [];
+		const cwd = await requireProjectRoot();
+		const core = new Core(cwd);
+		await core.ensureConfigLoaded();
+
+		let canonicalStatus: string | undefined;
+		if (options.setStatus) {
+			const canonical = await getCanonicalStatus(String(options.setStatus), core);
+			if (!canonical) {
+				const configuredStatuses = await getValidStatuses(core);
+				console.error(
+					`Invalid status: ${options.setStatus}. Valid statuses are: ${formatValidStatuses(configuredStatuses)}`,
+				);
+				process.exitCode = 1;
+				return;
+			}
+			if (canonical.toLowerCase() === "draft") {
+				console.error("Bulk status updates do not support Draft. Use task edit for draft promotion or demotion.");
+				process.exitCode = 1;
+				return;
+			}
+			canonicalStatus = canonical;
+		}
+
+		const clearMilestone = Boolean(options.clearMilestone);
+		if (clearMilestone && options.setMilestone !== undefined) {
+			console.error("Use either --clear-milestone or --set-milestone, not both.");
+			process.exitCode = 1;
+			return;
+		}
+		const clearSummaryParent = Boolean(options.clearSummaryParent);
+		if (clearSummaryParent && options.setSummaryParent !== undefined) {
+			console.error("Use either --clear-summary-parent or --set-summary-parent, not both.");
+			process.exitCode = 1;
+			return;
+		}
+		const clearNotes = Boolean(options.clearNotes);
+		if (clearNotes && options.setNotes !== undefined) {
+			console.error("Use either --clear-notes or --set-notes, not both.");
+			process.exitCode = 1;
+			return;
+		}
+
+		const setLabelValues = parseCommaSeparated(options.setLabels);
+		const addLabelValues = parseCommaSeparated(options.addLabel);
+		const removeLabelValues = parseCommaSeparated(options.removeLabel);
+		const setDocumentation = parseCommaSeparated(options.setDoc);
+		const addDocumentation = parseCommaSeparated(options.addDoc);
+		const removeDocumentation = parseCommaSeparated(options.removeDoc);
+		const setReferences = parseCommaSeparated(options.setRef);
+		const addReferences = parseCommaSeparated(options.addRef);
+		const removeReferences = parseCommaSeparated(options.removeRef);
+		const appendNotes = toStringArray(options.appendNotes);
+
+		const editArgs: TaskEditArgs = {};
+		if (canonicalStatus) {
+			editArgs.status = canonicalStatus;
+		}
+		if (clearMilestone) {
+			editArgs.milestone = null;
+		} else if (options.setMilestone !== undefined) {
+			editArgs.milestone = await resolveMilestoneForCli(core, String(options.setMilestone));
+		}
+		if (clearSummaryParent) {
+			editArgs.summaryParentTaskId = null;
+		} else if (options.setSummaryParent !== undefined) {
+			editArgs.summaryParentTaskId = normalizeTaskId(String(options.setSummaryParent));
+		}
+		if (setLabelValues.length > 0) {
+			editArgs.labels = setLabelValues;
+		}
+		if (addLabelValues.length > 0) {
+			editArgs.addLabels = addLabelValues;
+		}
+		if (removeLabelValues.length > 0) {
+			editArgs.removeLabels = removeLabelValues;
+		}
+		if (setDocumentation.length > 0) {
+			editArgs.documentation = setDocumentation;
+		}
+		if (addDocumentation.length > 0) {
+			editArgs.addDocumentation = addDocumentation;
+		}
+		if (removeDocumentation.length > 0) {
+			editArgs.removeDocumentation = removeDocumentation;
+		}
+		if (setReferences.length > 0) {
+			editArgs.references = setReferences;
+		}
+		if (addReferences.length > 0) {
+			editArgs.addReferences = addReferences;
+		}
+		if (removeReferences.length > 0) {
+			editArgs.removeReferences = removeReferences;
+		}
+		if (typeof options.setNotes === "string") {
+			editArgs.notesSet = String(options.setNotes);
+		}
+		if (appendNotes.length > 0) {
+			editArgs.notesAppend = appendNotes;
+		}
+		if (clearNotes) {
+			editArgs.notesClear = true;
+		}
+
+		const updateInput = buildTaskUpdateInput(editArgs);
+		const changeSummary = buildBulkTaskUpdateSummaryLines({
+			status: canonicalStatus,
+			milestone: clearMilestone ? null : editArgs.milestone !== undefined ? String(editArgs.milestone) : undefined,
+			summaryParentTaskId: clearSummaryParent
+				? null
+				: editArgs.summaryParentTaskId !== undefined
+					? String(editArgs.summaryParentTaskId)
+					: undefined,
+			setLabels: editArgs.labels,
+			addLabels: editArgs.addLabels,
+			removeLabels: editArgs.removeLabels,
+			setDocumentation: editArgs.documentation,
+			addDocumentation: editArgs.addDocumentation,
+			removeDocumentation: editArgs.removeDocumentation,
+			setReferences: editArgs.references,
+			addReferences: editArgs.addReferences,
+			removeReferences: editArgs.removeReferences,
+			setNotes: editArgs.notesSet,
+			appendNotes: editArgs.notesAppend,
+			clearNotes: editArgs.notesClear,
+		});
+		if (changeSummary.length === 0) {
+			console.error("Specify at least one bulk mutation flag such as --set-status, --add-label, or --set-doc.");
+			process.exitCode = 1;
+			return;
+		}
+
+		let selection: ResolvedBulkTaskSelection;
+		try {
+			selection = await resolveBulkTaskSelection(core, selectorTaskIds, {
+				query: options.query,
+				selectStatus: options.selectStatus,
+				selectAssignee: options.selectAssignee,
+				selectParent: options.selectParent,
+				selectSummaryParent: options.selectSummaryParent,
+				selectMilestone: options.selectMilestone,
+				selectPriority: options.selectPriority,
+				selectMissingField: options.selectMissingField,
+				selectMissingSummaryParent: options.selectMissingSummaryParent,
+				selectInvalidLabels: options.selectInvalidLabels,
+				selectInvalidDependencies: options.selectInvalidDependencies,
+				selectInvalidMilestones: options.selectInvalidMilestones,
+			});
+		} catch (error) {
+			console.error(error instanceof Error ? error.message : String(error));
+			process.exitCode = 1;
+			return;
+		}
+
+		const previewReport = buildBulkTaskPreviewReport({
+			mode: useApply ? "apply" : "preview",
+			selection,
+			changeLines: changeSummary,
+		});
+		console.log(previewReport);
+
+		if (!useApply) {
+			console.log("");
+			console.log("Re-run with --apply to persist these changes.");
+			return;
+		}
+
+		if (selection.tasks.length === 0) {
+			console.log("");
+			console.log("No local tasks matched the bulk selection. Nothing was changed.");
+			return;
+		}
+
+		try {
+			const summary = await applyBulkTaskEdits(
+				core,
+				selection.tasks,
+				updateInput,
+				changeSummary,
+				selection.missingTaskIds,
+			);
+			console.log("");
+			console.log(summary);
+		} catch (error) {
+			console.error(error instanceof Error ? error.message : String(error));
+			process.exitCode = 1;
+		}
+	});
+
+taskCmd
 	.command("view <taskId>")
 	.description("display task details")
 	.option("--plain", "use plain text output instead of interactive UI")
+	.option("--json", "use structured JSON output")
 	.action(async (taskId: string, options) => {
+		if (!validateOutputFlags(options)) {
+			return;
+		}
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
 		const localTasks = await core.fs.listTasks();
@@ -2280,6 +3371,15 @@ taskCmd
 			: [...localTasks, task];
 
 		// Plain text output for non-interactive environments
+		if (isJsonRequested(options)) {
+			printJson({
+				ok: true,
+				command: "task.view",
+				path: task.filePath ?? null,
+				task: serializeTaskForCli(task),
+			});
+			return;
+		}
 		const usePlainOutput = isPlainRequested(options) || shouldAutoPlain;
 		if (usePlainOutput) {
 			console.log(formatTaskPlainText(task));
@@ -2321,7 +3421,11 @@ taskCmd
 taskCmd
 	.argument("[taskId]")
 	.option("--plain", "use plain text output")
-	.action(async (taskId: string | undefined, options: { plain?: boolean }) => {
+	.option("--json", "use structured JSON output")
+	.action(async (taskId: string | undefined, options: { plain?: boolean; json?: boolean }) => {
+		if (!validateOutputFlags(options)) {
+			return;
+		}
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
 
@@ -2351,6 +3455,15 @@ taskCmd
 			: [...localTasks, task];
 
 		// Plain text output for non-interactive environments
+		if (isJsonRequested(options)) {
+			printJson({
+				ok: true,
+				command: "task.view",
+				path: task.filePath ?? null,
+				task: serializeTaskForCli(task),
+			});
+			return;
+		}
 		const usePlainOutput = isPlainRequested(options) || shouldAutoPlain;
 		if (usePlainOutput) {
 			console.log(formatTaskPlainText(task));
@@ -2664,7 +3777,8 @@ milestoneCmd
 		"-d, --description <text>",
 		"milestone description (multi-line: bash $'Line1\\nLine2', POSIX printf, PowerShell \"Line1`nLine2\")",
 	)
-	.action(async (title: string | undefined, options: { description?: string }) => {
+	.option("--plain", "use plain text output")
+	.action(async (title: string | undefined, _options: { description?: string; plain?: boolean }) => {
 		const shouldUseWizard = hasInteractiveTTY && title === undefined;
 		if (!shouldUseWizard && (title === undefined || title.trim().length === 0)) {
 			printMissingRequiredArgument("title");
@@ -2694,7 +3808,7 @@ milestoneCmd
 			return;
 		}
 		try {
-			const milestone = await addMilestoneForProject(core, title ?? "", options.description);
+			const milestone = await addMilestoneForProject(core, title ?? "", _options.description);
 			console.log(`Created milestone "${milestone.title}" (${milestone.id}).`);
 		} catch (error) {
 			if (error instanceof MilestoneMutationError) {
@@ -2713,13 +3827,14 @@ milestoneCmd
 		"-d, --description <text>",
 		"milestone description (multi-line: bash $'Line1\\nLine2', POSIX printf, PowerShell \"Line1`nLine2\")",
 	)
-	.action(async (name: string | undefined, options: { description?: string }) => {
-		const shouldUseWizard = hasInteractiveTTY && (name === undefined || options.description === undefined);
+	.option("--plain", "use plain text output")
+	.action(async (name: string | undefined, _options: { description?: string; plain?: boolean }) => {
+		const shouldUseWizard = hasInteractiveTTY && (name === undefined || _options.description === undefined);
 		if (!shouldUseWizard && (name === undefined || name.trim().length === 0)) {
 			printMissingRequiredArgument("name");
 			return;
 		}
-		if (!shouldUseWizard && options.description === undefined) {
+		if (!shouldUseWizard && _options.description === undefined) {
 			printMissingRequiredOption("-d, --description <text>");
 			return;
 		}
@@ -2765,7 +3880,7 @@ milestoneCmd
 				return;
 			}
 
-			let description = options.description;
+			let description = _options.description;
 			if (shouldUseWizard && description === undefined) {
 				const wizardValues = await runMilestoneEditWizard({ milestone: milestoneRecord });
 				if (!wizardValues) {
@@ -2798,7 +3913,8 @@ milestoneCmd
 	.command("rename <from> <to>")
 	.description("rename a milestone file and update matching tasks by default")
 	.option("--no-update-tasks", "do not rewrite task milestone fields")
-	.action(async (from: string, to: string, options: { noUpdateTasks?: boolean }) => {
+	.option("--plain", "use plain text output")
+	.action(async (from: string, to: string, options: { noUpdateTasks?: boolean; plain?: boolean }) => {
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
 		await core.ensureConfigLoaded();
@@ -2828,7 +3944,8 @@ milestoneCmd
 		"clear",
 	)
 	.option("--reassign-to <name>", "target milestone when --tasks reassign")
-	.action(async (name: string, options: { tasks?: string; reassignTo?: string }) => {
+	.option("--plain", "use plain text output")
+	.action(async (name: string, options: { tasks?: string; reassignTo?: string; plain?: boolean }) => {
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
 		await core.ensureConfigLoaded();
@@ -2858,7 +3975,8 @@ milestoneCmd
 milestoneCmd
 	.command("archive <name>")
 	.description("archive a milestone by id or title")
-	.action(async (name: string) => {
+	.option("--plain", "use plain text output")
+	.action(async (name: string, _options: { plain?: boolean }) => {
 		const cwd = await requireProjectRoot();
 		const core = new Core(cwd);
 		const result = await core.archiveMilestone(name);
@@ -3394,6 +4512,9 @@ configCmd
 				case "definitionOfDone":
 					console.log(config.definitionOfDone?.join(", ") || "");
 					break;
+				case "validation":
+					console.log(JSON.stringify(config.validation ?? {}, null, 2));
+					break;
 				case "dateFormat":
 					console.log(config.dateFormat);
 					break;
@@ -3427,7 +4548,7 @@ configCmd
 				default:
 					console.error(`Unknown config key: ${key}`);
 					console.error(
-						"Available keys: defaultEditor, projectName, defaultStatus, statuses, labels, milestones, definitionOfDone, dateFormat, maxColumnWidth, defaultPort, autoOpenBrowser, remoteOperations, autoCommit, bypassGitHooks, zeroPaddedIds, checkActiveBranches, activeBranchDays",
+						"Available keys: defaultEditor, projectName, defaultStatus, statuses, labels, milestones, definitionOfDone, validation, dateFormat, maxColumnWidth, defaultPort, autoOpenBrowser, remoteOperations, autoCommit, bypassGitHooks, zeroPaddedIds, checkActiveBranches, activeBranchDays",
 					);
 					process.exit(1);
 			}
@@ -3575,6 +4696,7 @@ configCmd
 				case "labels":
 				case "milestones":
 				case "definitionOfDone":
+				case "validation":
 					if (key === "milestones") {
 						console.error("milestones cannot be set directly.");
 						console.error(
@@ -3584,6 +4706,11 @@ configCmd
 						console.error("definitionOfDone cannot be set directly.");
 						console.error(
 							"Use `backlog config` for interactive editing, update `backlog/config.yml`, or use Web UI Settings.",
+						);
+					} else if (key === "validation") {
+						console.error("validation cannot be set directly.");
+						console.error(
+							"Update the validation object in backlog/config.yml directly, or inspect it with `backlog config get validation`.",
 						);
 					} else {
 						console.error(`${key} cannot be set directly. Use 'backlog config list-${key}' to view current values.`);
@@ -3638,6 +4765,7 @@ configCmd
 			const milestones = await core.filesystem.listMilestones();
 			console.log(`  milestones: [${milestones.map((milestone) => milestone.id).join(", ")}]`);
 			console.log(`  definitionOfDone: [${(config.definitionOfDone ?? []).join(", ")}]`);
+			console.log(`  validation: ${JSON.stringify(config.validation ?? {})}`);
 			console.log(`  dateFormat: ${config.dateFormat}`);
 			console.log(`  maxColumnWidth: ${config.maxColumnWidth || "(not set)"}`);
 			console.log(`  autoOpenBrowser: ${config.autoOpenBrowser ?? "(not set)"}`);
@@ -3651,6 +4779,36 @@ configCmd
 			console.log(`  activeBranchDays: ${config.activeBranchDays ?? "30"}`);
 		} catch (err) {
 			console.error("Failed to list config values", err);
+			process.exitCode = 1;
+		}
+	});
+
+program
+	.command("validate")
+	.alias("lint")
+	.description("check backlog metadata hygiene and governance rules")
+	.option("--json", "use structured JSON output")
+	.action(async (options: { json?: boolean }) => {
+		const cwd = await requireProjectRoot();
+		const core = new Core(cwd);
+		const report = await validateBacklogProject(core);
+
+		if (isJsonRequested(options)) {
+			printJson({
+				ok: true,
+				command: "validate",
+				valid: report.valid,
+				taskCount: report.taskCount,
+				issueCount: report.issueCount,
+				requiredTaskFields: report.requiredTaskFields,
+				issueCounts: report.issueCounts,
+				issues: report.issues,
+			});
+		} else {
+			printValidationReport(report);
+		}
+
+		if (!report.valid) {
 			process.exitCode = 1;
 		}
 	});

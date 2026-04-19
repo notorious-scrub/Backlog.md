@@ -210,6 +210,12 @@ export class Core {
 			const parentFilter = filters.parentTaskId;
 			result = result.filter((task) => task.parentTaskId && taskIdsEqual(parentFilter, task.parentTaskId));
 		}
+		if (filters.summaryParentTaskId) {
+			const summaryParentFilter = filters.summaryParentTaskId;
+			result = result.filter(
+				(task) => task.summaryParentTaskId && taskIdsEqual(summaryParentFilter, task.summaryParentTaskId),
+			);
+		}
 		if (filters.labels && filters.labels.length > 0) {
 			const requiredLabels = filters.labels.map((label) => label.toLowerCase()).filter(Boolean);
 			if (requiredLabels.length > 0) {
@@ -264,6 +270,26 @@ export class Core {
 		return normalized as "high" | "medium" | "low";
 	}
 
+	private async resolveSummaryParentTaskId(
+		summaryParentTaskId: string | undefined,
+		taskIdToExclude?: string,
+	): Promise<string | undefined> {
+		if (!summaryParentTaskId) {
+			return undefined;
+		}
+
+		const [tasks, drafts] = await Promise.all([this.fs.listTasks(), this.fs.listDrafts()]);
+		const knownIds = [...tasks.map((task) => task.id), ...drafts.map((draft) => draft.id)];
+		const match = knownIds.find((id) => taskIdsEqual(summaryParentTaskId, id));
+		if (!match) {
+			throw new Error(`Summary parent ${summaryParentTaskId} not found.`);
+		}
+		if (taskIdToExclude && taskIdsEqual(match, taskIdToExclude)) {
+			throw new Error("A task cannot be its own summary parent.");
+		}
+		return match;
+	}
+
 	private isExactTaskReference(reference: string, taskId: string): boolean {
 		const trimmed = reference.trim();
 		if (!trimmed) {
@@ -312,6 +338,8 @@ export class Core {
 		const { filters, query, limit } = options;
 		const trimmedQuery = query?.trim();
 		const includeCrossBranch = options.includeCrossBranch ?? true;
+		const store = await this.getContentStore();
+		const relationshipSource = store.getTasks();
 
 		let milestoneResolution: { active: Milestone[]; archived: Milestone[] } | undefined;
 		if (filters?.milestoneId !== undefined) {
@@ -325,13 +353,12 @@ export class Core {
 				filtered = this.filterLocalEditableTasks(filtered);
 			}
 			if (typeof limit === "number" && limit >= 0) {
-				return filtered.slice(0, limit);
+				filtered = filtered.slice(0, limit);
 			}
-			return filtered;
+			return filtered.map((task) => attachSubtaskSummaries(task, relationshipSource));
 		};
 
 		if (!trimmedQuery) {
-			const store = await this.getContentStore();
 			const tasks = store.getTasks();
 			return applyFiltersAndLimit(tasks);
 		}
@@ -978,6 +1005,7 @@ export class Core {
 			labels?: string[];
 			dependencies?: string[];
 			parentTaskId?: string;
+			summaryParentTaskId?: string;
 			priority?: "high" | "medium" | "low";
 			// First-party structured fields from Web UI / CLI
 			description?: string;
@@ -993,6 +1021,7 @@ export class Core {
 		const isDraft = taskData.status?.toLowerCase() === "draft";
 		const entityType = isDraft ? EntityType.Draft : EntityType.Task;
 		const id = await this.generateNextId(entityType, isDraft ? undefined : taskData.parentTaskId);
+		const summaryParentTaskId = await this.resolveSummaryParentTaskId(taskData.summaryParentTaskId, id);
 
 		const task: Task = {
 			id,
@@ -1004,6 +1033,7 @@ export class Core {
 			rawContent: "",
 			createdDate: new Date().toISOString().slice(0, 16).replace("T", " "),
 			...(taskData.parentTaskId && { parentTaskId: taskData.parentTaskId }),
+			...(summaryParentTaskId && { summaryParentTaskId }),
 			...(taskData.priority && { priority: taskData.priority }),
 			...(typeof taskData.milestone === "string" &&
 				taskData.milestone.trim().length > 0 && {
@@ -1069,6 +1099,7 @@ export class Core {
 
 		const priority = this.normalizePriority(input.priority);
 		const createdDate = new Date().toISOString().slice(0, 16).replace("T", " ");
+		const summaryParentTaskId = await this.resolveSummaryParentTaskId(input.summaryParentTaskId, id);
 
 		const acceptanceCriteriaItems = Array.isArray(input.acceptanceCriteria)
 			? input.acceptanceCriteria
@@ -1098,6 +1129,7 @@ export class Core {
 			rawContent: input.rawContent ?? "",
 			createdDate,
 			...(input.parentTaskId && { parentTaskId: input.parentTaskId }),
+			...(summaryParentTaskId && { summaryParentTaskId }),
 			...(priority && { priority }),
 			...(typeof input.milestone === "string" &&
 				input.milestone.trim().length > 0 && {
@@ -1387,6 +1419,22 @@ export class Core {
 					delete task.milestone;
 				} else {
 					task.milestone = normalizedMilestone;
+				}
+				mutated = true;
+			}
+		}
+
+		if (input.summaryParentTaskId !== undefined) {
+			const normalizedSummaryParent =
+				input.summaryParentTaskId === null
+					? undefined
+					: await this.resolveSummaryParentTaskId(input.summaryParentTaskId, task.id);
+			if ((task.summaryParentTaskId ?? undefined) !== normalizedSummaryParent) {
+				if (normalizedSummaryParent === undefined) {
+					delete task.summaryParentTaskId;
+					delete task.summaryParentTaskTitle;
+				} else {
+					task.summaryParentTaskId = normalizedSummaryParent;
 				}
 				mutated = true;
 			}

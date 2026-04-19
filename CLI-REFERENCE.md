@@ -1,6 +1,40 @@
 # CLI Reference
 
-Full command reference for Backlog.md. For getting started, see [README.md](README.md).
+Authoritative command reference for Backlog.md. For getting started, see [README.md](README.md). For the concise agent cheat sheet, see [CLI-CHEATSHEET.md](CLI-CHEATSHEET.md).
+
+## Agent And PowerShell Quick Start
+
+Use this flow when an agent or script is operating a backlog directly:
+
+1. Run commands from the project root that contains `backlog/`.
+2. Search or list first so you do not create duplicates:
+   - `backlog task list --plain`
+   - `backlog search "topic" --type task --plain`
+3. Read with `--plain` for deterministic text, or `--json` when you need a stable machine-readable contract.
+4. Write through the CLI instead of editing Markdown by hand.
+5. For PowerShell, quote values that begin with `@` and use backtick newlines for multi-line text.
+
+Output mode guidance:
+- `--plain` is the default agent-safe text mode for read/search flows and post-write confirmations.
+- `--json` is supported on `task create`, `task edit`, `task view`, `task list`, and `search` for automation chaining.
+
+Modeling guidance:
+- Use `--parent` when you want dotted subtasks.
+- Use `--summary-parent` when you want hierarchy without blocker semantics or dotted IDs.
+- Use dependency flags only for true blocker relationships.
+
+Edit semantics that matter for reliable automation:
+- `--label` replaces the whole label set; `--add-label` / `--remove-label` mutate it.
+- `--acceptance-criteria` replaces the whole AC set; `--ac` appends items.
+- `--notes` / `--final-summary` replace text; `--append-notes` / `--append-final-summary` append blocks.
+- `task bulk` previews by default. Add `--apply` only after reviewing the match set and pending changes.
+
+Governance workflow shortcuts:
+- `backlog validate --json`
+- `backlog report governance missing-documentation --plain`
+- `backlog task list --missing-field documentation --plain`
+- `backlog task list --missing-summary-parent --plain`
+- `backlog task bulk --query "auth" --set-milestone "Release 1.0"`
 
 ## Project Setup
 
@@ -44,15 +78,24 @@ You can rerun the wizard anytime with `backlog config`. All existing CLI flags (
 | Create with refs | `backlog task create "Feature" --ref https://docs.example.com --ref src/api.ts` |
 | Create with docs | `backlog task create "Feature" --doc https://design-docs.example.com --doc docs/spec.md` |
 | Create sub task | `backlog task create -p 14 "Add Login with Google"`|
+| Create with summary parent | `backlog task create "Wave child" --summary-parent 14` |
 | Create (all options) | `backlog task create "Feature" -d "Description" -a @sara -s "To Do" -l auth --priority high --ac "Must work" --notes "Initial setup done" --dep task-1 --ref src/api.ts --doc docs/spec.md -p 14` |
 | Create with milestone | `backlog task create "Feature" --milestone "Release 1.0"` |
-| List tasks  | `backlog task list [-s <status>] [-a <assignee>] [-p <parent>] [-m <milestone-or-none>]` |
+| List tasks  | `backlog task list [-s <status>] [-a <assignee>] [-p <parent>] [--summary-parent <task>] [-m <milestone-or-none>]` |
 | List by parent | `backlog task list --parent 42` or `backlog task list -p task-42` |
+| List by summary parent | `backlog task list --summary-parent 42` |
+| List by governance gap | `backlog task list --missing-field documentation` |
+| List invalid metadata | `backlog task list --invalid-labels --invalid-dependencies --invalid-milestones` |
 | View detail | `backlog task 7` (interactive UI, press 'E' to edit in editor) |
 | View (AI mode) | `backlog task 7 --plain`                           |
+| View (JSON) | `backlog task 7 --json` |
 | Edit        | `backlog task edit 7 -a @sara -l auth,backend`       |
+| Edit (JSON) | `backlog task edit 7 -s "In Progress" --json` |
 | Bulk set milestone | `backlog task milestone 7 8 --milestone "Release 1.0"` |
 | Bulk clear milestone | `backlog task milestone 7 8 --clear` |
+| Bulk preview labels | `backlog task bulk --select-status "To Do" --add-label governance` |
+| Bulk apply docs | `backlog task bulk 7 8 --set-doc docs/spec.md --apply` |
+| Bulk apply by query | `backlog task bulk --query "auth" --set-milestone "Release 1.0" --apply` |
 | Add plan    | `backlog task edit 7 --plan "Implementation approach"`    |
 | Add AC      | `backlog task edit 7 --ac "New criterion" --ac "Another one"` |
 | Add DoD     | `backlog task edit 7 --dod "Ship notes"` |
@@ -73,7 +116,28 @@ You can rerun the wizard anytime with `backlog config`. All existing CLI flags (
 | Add deps    | `backlog task edit 7 --dep task-1 --dep task-2`     |
 | Set milestone | `backlog task edit 7 --milestone "Release 1.0"` |
 | Clear milestone | `backlog task edit 7 --clear-milestone` (alias: `--no-milestone`) |
+| Set summary parent | `backlog task edit 7 --summary-parent 42` |
+| Clear summary parent | `backlog task edit 7 --clear-summary-parent` |
 | Archive     | `backlog task archive 7`                             |
+
+Task edit semantics:
+- `--label` replaces the full label set; `--add-label` appends unique labels; `--remove-label` removes matches.
+- `--acceptance-criteria` replaces the full acceptance-criteria set; `--ac` appends new items after the current set.
+- `--notes` and `--final-summary` replace existing text; `--append-notes` and `--append-final-summary` append blocks.
+- `--milestone` sets the task milestone; `--clear-milestone` / `--no-milestone` removes it.
+- `--parent` creates or filters dotted subtasks; `--summary-parent` models non-blocking hierarchy without dotted IDs.
+- `task bulk` defaults to a preview. Add `--apply` to persist bulk label, doc, ref, notes, status, milestone, or summary-parent updates.
+
+Bulk task workflow:
+- Select tasks with explicit IDs, `--query`, or `--select-*` filters such as `--select-status`, `--select-milestone`, `--select-summary-parent`, `--select-missing-field`, `--select-invalid-labels`, `--select-invalid-dependencies`, and `--select-invalid-milestones`.
+- Mutate with `--set-status`, `--set-milestone`, `--clear-milestone`, `--set-summary-parent`, `--clear-summary-parent`, `--set-labels`, `--add-label`, `--remove-label`, `--set-doc`, `--add-doc`, `--remove-doc`, `--set-ref`, `--add-ref`, `--remove-ref`, `--set-notes`, `--append-notes`, or `--clear-notes`.
+- Default mode is preview-only. Use `--apply` to write the planned changes after reviewing the selection and summary.
+
+Structured JSON output:
+- `task create`, `task edit`, `task view`, `task list`, and `search` support `--json`.
+- `task create` / `task edit` JSON responses include the task ID, persisted path, timestamps, and the full structured task payload for chaining.
+- `task list --json` returns both grouped and flat task arrays.
+- `search --json` returns typed task/document/decision result records plus counts and applied filters.
 
 ### Multi-line input (description/plan/notes/final summary)
 
@@ -91,6 +155,11 @@ The CLI preserves input literally; `\n` sequences are not auto-converted. Use on
 - **PowerShell (backtick)**
   - `backlog task create "Feature" --desc "Line1`nLine2`n`nFinal paragraph"`
 
+PowerShell tips:
+- Quote values that start with `@`, such as `--assignee "@codex"`, so PowerShell does not treat them as array/hash literals.
+- In a source checkout, `backlog` now prefers the repo's `src/cli.ts` runtime. `backlog --version` should match `package.json` when you are testing local changes.
+- When troubleshooting Windows wrapper drift, prefer `backlog --version` and `backlog browser --no-open` as the first runtime identity checks before debugging task data.
+
 Tip: Help text shows Bash examples with escaped `\\n` for readability; when typing, `$'\n'` expands to a newline.
 
 ## Milestones
@@ -106,14 +175,14 @@ task cleanup), list with optional discovery output, and view one record.
 | List completed buckets too | `backlog milestone list --show-completed --plain` |
 | Append discovery report (files + orphan task labels) | `backlog milestone list --discovery --plain` |
 | View one milestone | `backlog milestone view m-0 --plain` or `backlog milestone view "Release 1.0" --plain` |
-| Add milestone file | `backlog milestone add "Release 1.0" -d "Scope and exit criteria"` or `backlog milestone add` in a TTY wizard |
-| Edit milestone description | `backlog milestone edit "Release 1.0" -d "Revised scope and exit criteria"` or `backlog milestone edit` in a TTY wizard |
-| Rename milestone file | `backlog milestone rename "Old" "New"` (updates matching tasks by default) |
-| Rename without touching tasks | `backlog milestone rename "Old" "New" --no-update-tasks` |
-| Remove (archives file; default clears tasks) | `backlog milestone remove "Release 1.0"` |
-| Remove but keep task labels | `backlog milestone remove "Release 1.0" --tasks keep` |
-| Remove and reassign tasks | `backlog milestone remove "Release 1.0" --tasks reassign --reassign-to "Other"` |
-| Archive only | `backlog milestone archive m-3` |
+| Add milestone file | `backlog milestone add "Release 1.0" -d "Scope and exit criteria" --plain` or `backlog milestone add` in a TTY wizard |
+| Edit milestone description | `backlog milestone edit "Release 1.0" -d "Revised scope and exit criteria" --plain` or `backlog milestone edit` in a TTY wizard |
+| Rename milestone file | `backlog milestone rename "Old" "New" --plain` (updates matching tasks by default) |
+| Rename without touching tasks | `backlog milestone rename "Old" "New" --no-update-tasks --plain` |
+| Remove (archives file; default clears tasks) | `backlog milestone remove "Release 1.0" --plain` |
+| Remove but keep task labels | `backlog milestone remove "Release 1.0" --tasks keep --plain` |
+| Remove and reassign tasks | `backlog milestone remove "Release 1.0" --tasks reassign --reassign-to "Other" --plain` |
+| Archive only | `backlog milestone archive m-3 --plain` |
 
 **Multi-line milestone description** uses the same rules as tasks (Bash
 `$'…'`, POSIX `printf`, PowerShell `` `n ``).
@@ -131,11 +200,64 @@ Find tasks, documents, and decisions across your entire backlog with fuzzy searc
 | Search tasks with no milestone | `backlog search --type task --milestone none` |
 | Combine filters    | `backlog search "web" --status "To Do" --priority medium` |
 | Plain text output  | `backlog search "feature" --plain` (for scripts/AI) |
+| JSON output  | `backlog search "feature" --json` |
 
 **Search features:**
 - **Fuzzy matching** -- finds "authentication" when searching for "auth"
 - **Interactive filters** -- refine your search in real-time with the TUI
 - **Live filtering** -- see results update as you type (no Enter needed)
+
+## Validation
+
+Use `backlog validate` (alias: `backlog lint`) to check backlog governance hygiene:
+
+| Action | Example |
+|--------|---------|
+| Human-readable validation report | `backlog validate` |
+| Machine-readable validation report | `backlog validate --json` |
+| Inspect configured validation rules | `backlog config get validation` |
+
+Current built-in checks cover:
+- Configured required task fields from `validation.requiredTaskFields`
+- Broken dependencies
+- Labels not declared in `config.labels`
+- Task milestone IDs that do not resolve to active or archived milestone records
+
+Use `validate` for a broad backlog-health pass. Use `report governance <name>` when you want a focused, repeatable answer for one class of governance issue.
+
+## Governance Reports
+
+Use repeatable named reports when you need a direct backlog-health answer instead of a generic validation dump:
+
+| Action | Example |
+|--------|---------|
+| Missing documentation report | `backlog report governance missing-documentation` |
+| Missing summary parent report | `backlog report governance missing-summary-parent` |
+| Invalid labels report | `backlog report governance invalid-labels` |
+| Invalid dependencies report | `backlog report governance invalid-dependencies` |
+| Invalid milestones report | `backlog report governance invalid-milestones` |
+| JSON governance report | `backlog report governance missing-documentation --json` |
+
+For ad hoc maintenance, `task list` also supports governance filters:
+- `--missing-field <field>`
+- `--missing-summary-parent`
+- `--invalid-labels`
+- `--invalid-dependencies`
+- `--invalid-milestones`
+
+For multi-task fixes, pair those filters with `task bulk`:
+
+```bash
+backlog task bulk --select-missing-field documentation --add-doc docs/spec.md
+backlog task bulk --select-invalid-labels --remove-label old-label --add-label canonical-label
+backlog task bulk --select-milestone "Release 1.0" --set-summary-parent BACK-100 --apply
+```
+
+Validation config lives in `backlog/config.yml` as a JSON object on the `validation:` line. Example:
+
+```yaml
+validation: {"requiredTaskFields":["description","documentation","assignee"]}
+```
 
 ## Draft Workflow
 

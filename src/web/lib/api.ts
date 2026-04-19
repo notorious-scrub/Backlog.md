@@ -4,6 +4,7 @@ import type {
 	BacklogConfig,
 	Decision,
 	Document,
+	GovernanceReport,
 	Milestone,
 	SearchPriorityFilter,
 	SearchResult,
@@ -139,6 +140,7 @@ export class ApiClient {
 		status?: string;
 		assignee?: string;
 		parent?: string;
+		summaryParent?: string;
 		priority?: SearchPriorityFilter;
 		labels?: string[];
 		crossBranch?: boolean;
@@ -147,6 +149,7 @@ export class ApiClient {
 		if (options?.status) params.append("status", options.status);
 		if (options?.assignee) params.append("assignee", options.assignee);
 		if (options?.parent) params.append("parent", options.parent);
+		if (options?.summaryParent) params.append("summaryParent", options.summaryParent);
 		if (options?.priority) params.append("priority", options.priority);
 		if (options?.labels) {
 			for (const label of options.labels) {
@@ -212,6 +215,10 @@ export class ApiClient {
 		return this.fetchJson<Task>(`${API_BASE}/task/${id}`);
 	}
 
+	async fetchGovernanceReport(id: GovernanceReport["id"]): Promise<GovernanceReport> {
+		return this.fetchJson<GovernanceReport>(`${API_BASE}/governance/reports/${encodeURIComponent(id)}`);
+	}
+
 	async fetchTaskAuditLog(
 		taskId: string,
 		options: Pick<TaskAuditEventFilter, "eventType" | "automationId" | "limit" | "cursor"> = {},
@@ -243,7 +250,10 @@ export class ApiClient {
 
 	async updateTask(
 		id: string,
-		updates: Omit<Partial<Task>, "milestone"> & { milestone?: string | null },
+		updates: Omit<Partial<Task>, "milestone" | "summaryParentTaskId"> & {
+			milestone?: string | null;
+			summaryParentTaskId?: string | null;
+		},
 	): Promise<Task> {
 		return this.fetchJson<Task>(`${API_BASE}/tasks/${id}`, {
 			method: "PUT",

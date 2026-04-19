@@ -21,6 +21,7 @@ export interface ViewState {
 		filterDescription?: string;
 		searchQuery?: string;
 		parentTaskId?: string;
+		summaryParentTaskId?: string;
 	};
 	kanbanData?: {
 		tasks: Task[];

@@ -1108,8 +1108,19 @@ function generateDetailContent(
 		const parentLabel = task.parentTaskTitle ? `${task.parentTaskId} - ${task.parentTaskTitle}` : task.parentTaskId;
 		metadata.push(`{bold}Parent:{/bold} {blue-fg}${parentLabel}{/}`);
 	}
+	if (task.summaryParentTaskId) {
+		const summaryParentLabel = task.summaryParentTaskTitle
+			? `${task.summaryParentTaskId} - ${task.summaryParentTaskTitle}`
+			: task.summaryParentTaskId;
+		metadata.push(`{bold}Summary Parent:{/bold} {cyan-fg}${summaryParentLabel}{/}`);
+	}
 	if (task.subtasks?.length) {
 		metadata.push(`{bold}Subtasks:{/bold} ${task.subtasks.length} task${task.subtasks.length > 1 ? "s" : ""}`);
+	}
+	if (task.summaryChildren?.length) {
+		metadata.push(
+			`{bold}Summary Children:{/bold} ${task.summaryChildren.length} task${task.summaryChildren.length > 1 ? "s" : ""}`,
+		);
 	}
 	if (task.dependencies?.length) {
 		metadata.push(`{bold}Dependencies:{/bold} ${task.dependencies.join(", ")}`);

@@ -111,6 +111,22 @@ describe("Task ID Generation with Archives", () => {
 		expect(newSubtask.task.id).toBe("TASK-1.1");
 	});
 
+	it("keeps summary-parent relationships separate from dotted subtask ids", async () => {
+		await core.createTaskFromInput({ title: "Summary Parent" }, false);
+
+		const summaryChild = await core.createTaskFromInput(
+			{
+				title: "Summary Child",
+				summaryParentTaskId: "task-1",
+			},
+			false,
+		);
+
+		expect(summaryChild.task.id).toBe("TASK-2");
+		expect(summaryChild.task.summaryParentTaskId).toBe("TASK-1");
+		expect(summaryChild.task.parentTaskId).toBeUndefined();
+	});
+
 	it("should work with zero-padded IDs and reuse archived IDs", async () => {
 		// Update config to use zero-padded IDs
 		const config = await core.fs.loadConfig();
